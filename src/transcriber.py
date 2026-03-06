@@ -62,23 +62,33 @@ def transcribe_local(
         vad_filter=True,
     )
 
+    from tqdm import tqdm
+
     duration = info.duration
     print(f"  Detected language: {info.language} (prob={info.language_probability:.2f})")
     print(f"  Audio duration: {duration / 60:.1f} min")
 
+    total_sec = int(duration)
+    pbar = tqdm(
+        total=total_sec,
+        unit="s",
+        desc="  Transcribing",
+        bar_format="  {desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]",
+    )
+
     segments = []
+    last_pos = 0
     for seg in segments_gen:
         segments.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
-        if duration > 0:
-            pct = min(seg.end / duration * 100, 100)
-            mins = seg.end / 60
-            total_mins = duration / 60
-            print(
-                f"\r  Progress: {mins:.1f}/{total_mins:.1f} min ({pct:.1f}%) | {len(segments)} segments",
-                end="", flush=True,
-            )
+        advance = min(seg.end, duration) - last_pos
+        if advance > 0:
+            pbar.update(advance)
+            last_pos = min(seg.end, duration)
 
-    print(f"\n  Transcription complete: {len(segments)} segments")
+    pbar.update(total_sec - last_pos)
+    pbar.close()
+
+    print(f"  Transcription complete: {len(segments)} segments")
     return segments
 
 
