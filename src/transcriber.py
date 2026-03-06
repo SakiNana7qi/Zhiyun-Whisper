@@ -62,13 +62,23 @@ def transcribe_local(
         vad_filter=True,
     )
 
+    duration = info.duration
     print(f"  Detected language: {info.language} (prob={info.language_probability:.2f})")
+    print(f"  Audio duration: {duration / 60:.1f} min")
 
     segments = []
     for seg in segments_gen:
         segments.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
+        if duration > 0:
+            pct = min(seg.end / duration * 100, 100)
+            mins = seg.end / 60
+            total_mins = duration / 60
+            print(
+                f"\r  Progress: {mins:.1f}/{total_mins:.1f} min ({pct:.1f}%) | {len(segments)} segments",
+                end="", flush=True,
+            )
 
-    print(f"  Transcription complete: {len(segments)} segments")
+    print(f"\n  Transcription complete: {len(segments)} segments")
     return segments
 
 
