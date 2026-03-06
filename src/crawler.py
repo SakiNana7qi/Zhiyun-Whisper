@@ -102,25 +102,85 @@ def _check_ffmpeg():
         )
 
 
-def _download_video(video_url: str, output_path: str) -> None:
-    """Stream-download a video file with progress display."""
-    resp = requests.get(video_url, stream=True)
-    resp.raise_for_status()
+def _download_video(
+    video_url: str,
+    output_path: str,
+    max_retries: int = 10,
+    timeout: int = 30,
+) -> None:
+    """
+    Stream-download a video file with resume support and automatic retry.
 
-    total = int(resp.headers.get("Content-Length", 0))
-    total_mb = total / (1024 * 1024) if total else 0
+    Uses HTTP Range headers to resume from where a previous attempt left off,
+    so partial downloads from connection drops are not wasted.
+    """
+    # Check how much we already have (supports resuming across runs too)
     downloaded = 0
+    if os.path.exists(output_path):
+        downloaded = os.path.getsize(output_path)
 
-    with open(output_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            f.write(chunk)
-            downloaded += len(chunk)
-            if total:
-                pct = downloaded / total * 100
-                dl_mb = downloaded / (1024 * 1024)
-                print(f"\r  Progress: {dl_mb:.0f}/{total_mb:.0f} MB ({pct:.1f}%)", end="", flush=True)
+    # Get total file size
+    head = requests.head(video_url, allow_redirects=True, timeout=timeout)
+    head.raise_for_status()
+    total = int(head.headers.get("Content-Length", 0))
+    total_mb = total / (1024 * 1024) if total else 0
 
-    print()
+    if downloaded >= total and total > 0:
+        print(f"  Video already fully downloaded ({total_mb:.0f} MB)")
+        return
+
+    if downloaded > 0:
+        print(f"  Resuming download from {downloaded / (1024*1024):.0f}/{total_mb:.0f} MB")
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            headers = {}
+            if downloaded > 0:
+                headers["Range"] = f"bytes={downloaded}-"
+
+            resp = requests.get(
+                video_url,
+                stream=True,
+                headers=headers,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+
+            mode = "ab" if downloaded > 0 else "wb"
+            with open(output_path, mode) as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = downloaded / total * 100
+                        dl_mb = downloaded / (1024 * 1024)
+                        print(
+                            f"\r  Progress: {dl_mb:.0f}/{total_mb:.0f} MB ({pct:.1f}%)",
+                            end="", flush=True,
+                        )
+
+            print()
+            return  # success
+
+        except (requests.exceptions.RequestException, IOError) as e:
+            # Update downloaded to actual file size on disk
+            if os.path.exists(output_path):
+                downloaded = os.path.getsize(output_path)
+            dl_mb = downloaded / (1024 * 1024)
+
+            if attempt < max_retries:
+                wait = min(2 ** attempt, 30)
+                print(
+                    f"\n  Connection lost at {dl_mb:.0f} MB. "
+                    f"Retry {attempt}/{max_retries} in {wait}s..."
+                )
+                import time
+                time.sleep(wait)
+            else:
+                raise RuntimeError(
+                    f"Download failed after {max_retries} retries "
+                    f"({dl_mb:.0f}/{total_mb:.0f} MB downloaded): {e}"
+                ) from e
 
 
 def _extract_audio(video_path: str, audio_path: str) -> None:
@@ -180,24 +240,14 @@ def download_audio(
         print(f"  Audio already exists: {audio_path}")
         return audio_path
 
-    # Step 1: Download video
-    if os.path.exists(video_path):
-        print(f"  Video already downloaded: {video_path}")
-    else:
-        print(f"  Downloading video: {title}")
-        _download_video(video_url, video_path)
-        print(f"  Video saved: {video_path}")
+    # Step 1: Download video (resume-aware, checks completeness)
+    print(f"  Downloading video: {title}")
+    _download_video(video_url, video_path)
+    print(f"  Video ready: {video_path}")
 
     # Step 2: Extract audio
     print(f"  Extracting audio...")
     _extract_audio(video_path, audio_path)
     print(f"  Audio saved: {audio_path}")
-
-    # Step 3: Clean up video file to save disk space
-    try:
-        os.remove(video_path)
-        print(f"  Cleaned up video file")
-    except OSError:
-        pass
 
     return audio_path

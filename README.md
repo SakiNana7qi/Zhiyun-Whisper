@@ -4,10 +4,10 @@
 
 ## 功能
 
-- 自动登录浙大统一认证
 - 获取智云课堂课程录播视频
 - 支持本地 faster-whisper 和 OpenAI Whisper API 两种转录模式
 - 输出 `.txt`（纯文本）和 `.srt`（带时间戳字幕）格式
+- 大文件下载自动断点续传
 
 ## 前置条件
 
@@ -39,6 +39,19 @@ ZJU_PASSWORD="你的密码"
 OPENAI_API_KEY="sk-..."
 ```
 
+### HuggingFace 镜像（国内用户必配）
+
+首次运行本地模式时需要从 HuggingFace 下载 Whisper 模型，国内无法直连。
+需要设置环境变量使用镜像：
+
+**Windows (PowerShell):**
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+# 然后在同一终端运行 python main.py ...
+```
+
+**永久生效（推荐）：** 在系统环境变量中添加 `HF_ENDPOINT`，值为 `https://hf-mirror.com`。
+
 ## 使用
 
 ```bash
@@ -58,5 +71,7 @@ python main.py list --course-id 81771
 ## 输出
 
 转录结果保存在 `output/` 目录下，每个课次生成：
+- `课次标题.mp4` — 下载的视频文件
+- `课次标题.wav` — 提取的音频文件
 - `课次标题.txt` — 纯文本转录
 - `课次标题.srt` — 带时间戳的字幕文件
