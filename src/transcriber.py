@@ -22,6 +22,65 @@ class Segment:
     text: str
 
 
+def transcribe_with_model(
+    model: "WhisperModel",
+    audio_path: str,
+    language: str = "zh",
+) -> list[Segment]:
+    """
+    Transcribe audio using an already-loaded WhisperModel instance.
+
+    Skips the model loading step, making it suitable for real-time monitoring
+    where many short audio chunks are transcribed in sequence.
+
+    Args:
+        model: A pre-loaded faster_whisper.WhisperModel instance
+        audio_path: Path to audio file (WAV recommended)
+        language: Language code for transcription
+
+    Returns:
+        List of Segment objects with timestamps and text
+    """
+    from tqdm import tqdm
+
+    print(f"  Transcribing: {audio_path}")
+    segments_gen, info = model.transcribe(
+        audio_path,
+        language=language,
+        beam_size=5,
+        vad_filter=True,
+    )
+
+    duration = info.duration
+    if duration is None or duration <= 0:
+        duration = 1.0  # fallback for corrupted/empty audio
+    print(f"  Detected language: {info.language} (prob={info.language_probability:.2f})")
+    print(f"  Audio duration: {duration / 60:.1f} min")
+
+    total_sec = int(duration)
+    pbar = tqdm(
+        total=total_sec,
+        unit="s",
+        desc="  Transcribing",
+        bar_format="  {desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]",
+    )
+
+    segments = []
+    last_pos = 0
+    for seg in segments_gen:
+        segments.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
+        advance = min(seg.end, duration) - last_pos
+        if advance > 0:
+            pbar.update(advance)
+            last_pos = min(seg.end, duration)
+
+    pbar.update(total_sec - last_pos)
+    pbar.close()
+
+    print(f"  Transcription complete: {len(segments)} segments")
+    return segments
+
+
 def transcribe_local(
     audio_path: str,
     model_size: str = "large-v3",
@@ -54,42 +113,7 @@ def transcribe_local(
     print(f"  Loading model: {model_size} (device={device}, compute={compute_type})")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-    print(f"  Transcribing: {audio_path}")
-    segments_gen, info = model.transcribe(
-        audio_path,
-        language=language,
-        beam_size=5,
-        vad_filter=True,
-    )
-
-    from tqdm import tqdm
-
-    duration = info.duration
-    print(f"  Detected language: {info.language} (prob={info.language_probability:.2f})")
-    print(f"  Audio duration: {duration / 60:.1f} min")
-
-    total_sec = int(duration)
-    pbar = tqdm(
-        total=total_sec,
-        unit="s",
-        desc="  Transcribing",
-        bar_format="  {desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]",
-    )
-
-    segments = []
-    last_pos = 0
-    for seg in segments_gen:
-        segments.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
-        advance = min(seg.end, duration) - last_pos
-        if advance > 0:
-            pbar.update(advance)
-            last_pos = min(seg.end, duration)
-
-    pbar.update(total_sec - last_pos)
-    pbar.close()
-
-    print(f"  Transcription complete: {len(segments)} segments")
-    return segments
+    return transcribe_with_model(model, audio_path, language)
 
 
 # OpenAI Whisper API has a 25 MB file size limit

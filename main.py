@@ -184,5 +184,88 @@ def list_lessons(course_id: str):
     click.echo(f"\n  Total: {len(lessons)} | Available for download: {available_count}")
 
 
+@cli.command()
+@click.option("--course-id", "-c", required=True, help="Course ID from the classroom URL")
+@click.option("--keywords", "-k", default="小测,点到,考勤,点名", show_default=True,
+              help="Comma-separated list of keywords to watch for")
+@click.option("--chunk-duration", default=30, type=int, show_default=True,
+              help="Audio chunk length in seconds")
+@click.option("--model", default="small", show_default=True,
+              help="Whisper model size (tiny/base/small/medium/large-v3)")
+@click.option("--poll-interval", default=60, type=int, show_default=True,
+              help="Seconds between live-stream checks when no stream is active")
+@click.option("--chunks-dir", default="chunks", show_default=True,
+              help="Directory for temporary audio chunk files")
+@click.option("--debug", is_flag=True, default=False,
+              help="Print each chunk's transcription to stdout")
+def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_dir, debug):
+    """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
+    from src.live_monitor import monitor_loop
+
+    # DingTalk config — webhook and secret are required
+    webhook = os.getenv("DINGTALK_WEBHOOK", "").strip().strip('"')
+    secret = os.getenv("DINGTALK_SECRET", "").strip().strip('"')
+    if not webhook or not secret:
+        click.echo(
+            "Error: DINGTALK_WEBHOOK and DINGTALK_SECRET must be set in .env",
+            err=True,
+        )
+        sys.exit(1)
+
+    at_mobile = os.getenv("DINGTALK_AT_MOBILE", "").strip().strip('"')
+    at_mobiles = [at_mobile] if at_mobile else []
+
+    notifier_config = {
+        "webhook": webhook,
+        "secret": secret,
+        "at_mobiles": at_mobiles,
+    }
+
+    # LLM config — all three are required for LLM confirmation
+    llm_api_base = os.getenv("LLM_API_BASE", "").strip().strip('"')
+    llm_api_key = os.getenv("LLM_API_KEY", "").strip().strip('"')
+    llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini").strip().strip('"')
+    if not llm_api_base or not llm_api_key:
+        click.echo(
+            "Error: LLM_API_BASE and LLM_API_KEY must be set in .env",
+            err=True,
+        )
+        sys.exit(1)
+
+    llm_config = {
+        "api_base": llm_api_base,
+        "api_key": llm_api_key,
+        "model": llm_model,
+    }
+
+    keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+    click.echo(f"Monitoring course {course_id} for keywords: {keyword_list}")
+
+    session = _get_session()
+
+    token = os.getenv("ZJU_TOKEN", "").strip().strip('"')
+    if not token:
+        click.echo(
+            "Error: ZJU_TOKEN must be set in .env\n"
+            "  Get it from browser DevTools → Network → any XHR to classroom.zju.edu.cn → Authorization header (drop the 'Bearer ' prefix)",
+            err=True,
+        )
+        sys.exit(1)
+    session.headers.update({"Authorization": f"Bearer {token}"})
+
+    monitor_loop(
+        session=session,
+        course_id=course_id,
+        keywords=keyword_list,
+        chunk_seconds=chunk_duration,
+        model_size=model,
+        notifier_config=notifier_config,
+        llm_config=llm_config,
+        poll_interval=poll_interval,
+        chunks_dir=chunks_dir,
+        debug=debug,
+    )
+
+
 if __name__ == "__main__":
     cli()

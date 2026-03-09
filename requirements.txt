@@ -5,3 +5,5 @@ python-dotenv>=1.0.0
 click>=8.1.0
 faster-whisper>=1.0.0
 openai>=1.0.0
+pypinyin>=0.51.0
+rapidfuzz>=3.6.0

@@ -1,3 +1,4 @@
 output/
 .env
 src/__pycache__/
+chunks/
