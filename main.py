@@ -185,22 +185,24 @@ def list_lessons(course_id: str):
 
 
 @cli.command()
-@click.option("--course-id", "-c", required=True, help="Course ID from the classroom URL")
-@click.option("--keywords", "-k", default="小测,点到,考勤,点名", show_default=True,
+@click.option("--course-id", "-c", default=None, help="Course ID from the classroom URL (auto-detected if omitted)")
+@click.option("--keywords", "-k", default="小测,点到,考勤,点名,学在浙大,quiz,雷达", show_default=True,
               help="Comma-separated list of keywords to watch for")
 @click.option("--chunk-duration", default=30, type=int, show_default=True,
               help="Audio chunk length in seconds")
 @click.option("--model", default="small", show_default=True,
               help="Whisper model size (tiny/base/small/medium/large-v3)")
-@click.option("--poll-interval", default=60, type=int, show_default=True,
+@click.option("--poll-interval", default=15, type=int, show_default=True,
               help="Seconds between live-stream checks when no stream is active")
 @click.option("--chunks-dir", default="chunks", show_default=True,
               help="Directory for temporary audio chunk files")
+@click.option("--log-dir", default="logs", show_default=True,
+              help="Directory for persistent transcript logs")
 @click.option("--debug", is_flag=True, default=False,
               help="Print each chunk's transcription to stdout")
-def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_dir, debug):
+def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_dir, log_dir, debug):
     """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
-    from src.live_monitor import monitor_loop
+    from src.live_monitor import monitor_loop, fetch_live_courses
 
     # DingTalk config — webhook and secret are required
     webhook = os.getenv("DINGTALK_WEBHOOK", "").strip().strip('"')
@@ -253,9 +255,36 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
         sys.exit(1)
     session.headers.update({"Authorization": f"Bearer {token}"})
 
+    course_title = ""
+
+    # Auto-detect course_id from live schedule if not provided
+    if not course_id:
+        click.echo("No --course-id given, polling schedule until a live course appears...")
+        while not course_id:
+            try:
+                live_courses = fetch_live_courses(token)
+            except Exception as exc:
+                click.echo(f"Error fetching schedule: {exc}", err=True)
+                sys.exit(1)
+
+            if not live_courses:
+                click.echo(f"No live courses yet, retrying in {poll_interval}s...")
+                import time; time.sleep(poll_interval)
+            elif len(live_courses) == 1:
+                course_id = live_courses[0]["course_id"]
+                course_title = live_courses[0]["title"]
+                click.echo(f"Auto-selected: {course_title} (course_id={course_id})")
+            else:
+                click.echo("Multiple live courses found:")
+                for i, c in enumerate(live_courses, 1):
+                    click.echo(f"  {i}. {c['title']} (course_id={c['course_id']})")
+                click.echo("Use --course-id to specify which one to monitor.")
+                sys.exit(0)
+
     monitor_loop(
         session=session,
         course_id=course_id,
+        course_title=course_title,
         keywords=keyword_list,
         chunk_seconds=chunk_duration,
         model_size=model,
@@ -263,6 +292,7 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
         llm_config=llm_config,
         poll_interval=poll_interval,
         chunks_dir=chunks_dir,
+        log_dir=log_dir,
         debug=debug,
     )
 

@@ -57,25 +57,25 @@ def transcribe_with_model(
     print(f"  Detected language: {info.language} (prob={info.language_probability:.2f})")
     print(f"  Audio duration: {duration / 60:.1f} min")
 
-    total_sec = int(duration)
-    pbar = tqdm(
-        total=total_sec,
-        unit="s",
-        desc="  Transcribing",
-        bar_format="  {desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s [{elapsed}<{remaining}]",
-    )
+    total_sec = max(1, int(duration))
+    pbar = tqdm(total=total_sec, unit="s", desc="  Transcribing")
 
     segments = []
-    last_pos = 0
-    for seg in segments_gen:
-        segments.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
-        advance = min(seg.end, duration) - last_pos
-        if advance > 0:
-            pbar.update(advance)
-            last_pos = min(seg.end, duration)
-
-    pbar.update(total_sec - last_pos)
-    pbar.close()
+    last_pos = 0.0
+    try:
+        for seg in segments_gen:
+            seg_start = seg.start if seg.start is not None else last_pos
+            seg_end = seg.end if seg.end is not None else seg_start
+            segments.append(Segment(start=seg_start, end=seg_end, text=seg.text.strip()))
+            advance = min(seg_end, duration) - last_pos
+            if advance > 0:
+                pbar.update(advance)
+                last_pos = min(seg_end, duration)
+    finally:
+        remaining = total_sec - last_pos
+        if remaining > 0:
+            pbar.update(remaining)
+        pbar.close()
 
     print(f"  Transcription complete: {len(segments)} segments")
     return segments

@@ -9,11 +9,14 @@ by an LLM.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import subprocess
 import time
-from datetime import datetime
+from collections import deque
+from datetime import date, datetime
 from typing import Generator
 
 import requests
@@ -23,8 +26,69 @@ from src.crawler import CATALOGUE_API
 GET_SUB_INFO_API = (
     "https://classroom.zju.edu.cn/courseapi/v3/portal-home-setting/get-sub-info"
 )
+SCHEDULE_API = (
+    "https://yjapi.cmc.zju.edu.cn/courseapi/v2/schedule/get-week-schedules"
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Schedule API: auto-discover live courses
+# ---------------------------------------------------------------------------
+
+
+def fetch_live_courses(token: str) -> list[dict]:
+    """
+    Return all courses currently live for the authenticated user.
+
+    Decodes user_id and tenant_id from the JWT token, then queries the
+    weekly schedule API for today, filtering for live items (sub_status='1').
+
+    Returns a list of dicts: [{"course_id": "...", "title": "..."}]
+    """
+    # Decode JWT payload (no signature verification needed)
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = json.loads(base64.b64decode(payload_b64))
+        user_id = payload["sub"]
+        tenant_id = payload["tenant_id"]
+    except Exception as exc:
+        raise RuntimeError(f"Failed to decode ZJU_TOKEN JWT: {exc}") from exc
+
+    today = date.today().isoformat()
+    try:
+        resp = requests.get(
+            SCHEDULE_API,
+            params={
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "start_at": today,
+                "end_at": today,
+                "token": token,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"Schedule API request failed: {exc}") from exc
+
+    # Flatten all course items across all days
+    live = []
+    for day_entry in data.get("result", {}).get("list", []):
+        for item in day_entry.get("course", []):
+            if str(item.get("status", "")) == "1":
+                course_id = str(item.get("course_id", ""))
+                title = item.get("course_title") or course_id
+                if course_id:
+                    live.append({"course_id": course_id, "title": title})
+
+    if not live:
+        print(f"[debug] Raw schedule response: {json.dumps(data, ensure_ascii=False)[:3000]}")
+
+    return live
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +321,7 @@ def confirm_with_llm(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=10,
             temperature=0,
+            timeout=15,
         )
         answer = resp.choices[0].message.content.strip()
         if debug:
@@ -278,15 +343,70 @@ def confirm_with_llm(
 # ---------------------------------------------------------------------------
 
 
-def _build_message(keyword: str, full_text: str, course_id: str) -> str:
+def _build_message(
+    keyword: str,
+    course_id: str,
+    course_title: str,
+    recent_entries: list[str],
+    llm_analysis: str,
+) -> str:
     now = datetime.now().strftime("%H:%M:%S")
-    snippet = full_text[:150]
+    title_str = f"{course_title}（{course_id}）" if course_title else course_id
+    recent_str = "\n".join(recent_entries[-3:])
     return (
-        f"[智云直播监控] 检测到关键词：{keyword}\n"
-        f"课程：{course_id}\n"
-        f'转录片段："{snippet}"\n'
-        f"时间：{now}"
+        f"[智云直播监控] 触发关键词：{keyword}\n"
+        f"课程：{title_str}\n"
+        f"时间：{now}\n"
+        f"\n分析：{llm_analysis}\n"
+        f"\n最近转录：\n{recent_str}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM context analysis
+# ---------------------------------------------------------------------------
+
+
+def analyze_context_with_llm(
+    recent_entries: list[str],
+    keywords: list[str],
+    api_base: str,
+    api_key: str,
+    model: str,
+    debug: bool = False,
+) -> str:
+    """
+    Given the last few transcript chunks, ask the LLM for a brief description
+    of what alertable event is occurring and how it relates to the keywords.
+
+    Returns a short Chinese summary string (1-2 sentences).
+    Falls back to a plain string on API failure.
+    """
+    context = "\n".join(recent_entries[-3:])
+    kw_str = "、".join(keywords)
+    prompt = (
+        f"以下是课堂录音的最近几段转录文字（每段前有时间戳）：\n\n{context}\n\n"
+        f"请判断老师是否在宣布以下任一内容：{kw_str}。\n"
+        '如果是，用1-2句话简要说明检测到的具体内容。如果否，回答"未检测到相关内容"。'
+    )
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=api_base)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0,
+            timeout=15,
+        )
+        answer = resp.choices[0].message.content.strip()
+        if debug:
+            print(f"[debug] LLM analysis: {answer}")
+        return answer
+    except Exception as exc:
+        logger.error("LLM analysis failed: %s", exc)
+        return "（LLM分析失败）"
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +424,8 @@ def monitor_loop(
     llm_config: dict,
     poll_interval: int = 5,
     chunks_dir: str = "chunks",
+    log_dir: str = "logs",
+    course_title: str = "",
     debug: bool = False,
 ) -> None:
     """
@@ -347,6 +469,11 @@ def monitor_loop(
     print("[monitor] Model ready. Starting chunk processing...")
 
     # --- Phase 3: process chunks ---
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"{course_id}_{date.today().isoformat()}.txt")
+    print(f"[monitor] Transcript log → {log_path}")
+
+    recent_entries: deque[str] = deque(maxlen=5)  # rolling last-5-chunks buffer
     last_alert_time = 0.0
 
     while True:
@@ -370,6 +497,13 @@ def monitor_loop(
                     if not full_text.strip():
                         continue
 
+                    # Log every chunk permanently
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    entry = f"[{ts}] {full_text}"
+                    with open(log_path, "a", encoding="utf-8") as lf:
+                        lf.write(entry + "\n")
+                    recent_entries.append(entry)
+
                     if debug:
                         print(f"[debug] {full_text}")
 
@@ -390,7 +524,16 @@ def monitor_loop(
                         f"[monitor] Keyword '{kw}' matched (score={score:.0f}), confirming with LLM..."
                     )
                     if confirm_with_llm(full_text, **llm_config, debug=debug):
-                        message = _build_message(kw, full_text, course_id)
+                        analysis = analyze_context_with_llm(
+                            list(recent_entries), keywords, debug=debug, **llm_config
+                        )
+                        message = _build_message(
+                            keyword=kw,
+                            course_id=course_id,
+                            course_title=course_title,
+                            recent_entries=list(recent_entries),
+                            llm_analysis=analysis,
+                        )
                         at_mobiles = notifier_config.get("at_mobiles") or []
                         ok = send_dingtalk(
                             webhook=notifier_config["webhook"],
