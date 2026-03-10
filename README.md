@@ -9,6 +9,8 @@
 - 输出 `.txt`（纯文本）和 `.srt`（带时间戳字幕）格式
 - 大文件下载自动断点续传
 - **实时直播监控** — 检测「小测、点到、考勤」等关键词，通过钉钉机器人推送提醒
+- **自动检测当前直播** — 无需手动指定课程 ID，从课表自动发现正在直播的课程
+- **持久转录日志** — 每次直播的全文转录按课程+日期写入 `logs/` 目录永久保存
 
 ## 前置条件
 
@@ -97,27 +99,43 @@ python main.py list --course-id 81771
 实时监控智云直播，检测关键词（拼音模糊匹配 + LLM 语义确认），通过钉钉推送提醒。
 
 ```bash
-# 监控指定课程的直播（默认关键词：小测,点到,考勤,点名）
+# 不指定课程 ID — 自动从课表检测正在直播的课，没有则持续轮询等待
+python main.py monitor --debug
+
+# 指定课程 ID
 python main.py monitor --course-id 81706
 
 # 自定义关键词
-python main.py monitor --course-id 81706 --keywords "小测,随堂测验,点名"
+python main.py monitor --keywords "小测,随堂测验,点名"
 
-# 调试模式（打印每个 30s 音频块的转录文本和 LLM 响应）
-python main.py monitor --course-id 81706 --debug
+# 调试模式（打印每个 30s 音频块的转录文本和 LLM 分析）
+python main.py monitor --debug
 
-# 使用 small 模型（更快，适合实时场景）
-python main.py monitor --course-id 81706 --model small
+# 指定日志目录和临时切片目录
+python main.py monitor --log-dir logs --chunks-dir chunks
 ```
 
+**选项说明：**
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `--course-id` | 自动检测 | 课程 ID，省略时从课表自动发现直播 |
+| `--keywords` | `小测,点到,考勤,点名,学在浙大,quiz,雷达` | 逗号分隔的关键词 |
+| `--model` | `small` | Whisper 模型大小 |
+| `--chunk-duration` | `30` | 每段音频长度（秒） |
+| `--poll-interval` | `15` | 无直播时轮询间隔（秒） |
+| `--chunks-dir` | `chunks` | 临时音频切片目录（处理后删除） |
+| `--log-dir` | `logs` | 转录日志目录（永久保留） |
+| `--debug` | 关 | 打印每段转录文本和 LLM 响应 |
+
 **工作流程：**
-1. 轮询 catalogue API，等待直播开始（status='1'）
-2. 获取 HLS 流 URL（m3u8），用 ffmpeg 切成 30 秒 WAV 片段
-3. 用 faster-whisper 转录每个片段
-4. 拼音模糊匹配关键词（容忍口音导致的识别错误，如「小策」≈「小测」）
-5. 命中后调用 LLM 语义确认（降低误报率）
-6. 确认后通过钉钉 Webhook 推送提醒（120 秒冷却时间）
-7. 网络中断或 auth_key 过期时自动重连，直到直播结束（status 变化）
+1. 若未指定 `--course-id`，从课表 API 查找 `status='1'` 的直播课，没有则每隔 `--poll-interval` 秒重试
+2. 找到直播后，获取 HLS 流 URL（m3u8），用 ffmpeg 切成 30 秒 WAV 片段
+3. 用 faster-whisper 转录每个片段，全文追加写入 `logs/{course_id}_{date}.txt`
+4. 拼音模糊匹配关键词（容忍口音识别错误，如「小策」≈「小测」）
+5. 命中后调用 LLM 二次确认（是/否），通过后再调用 LLM 分析最近 3 段转录的语境
+6. 通过钉钉 Webhook 推送告警（含课程名称、时间、LLM 分析、最近转录原文），120 秒冷却
+7. 网络中断或 auth_key 过期时自动重连；直播结束（status 变化）时退出
 
 ## 输出
 
@@ -131,14 +149,24 @@ python main.py monitor --course-id 81706 --model small
 
 ### 直播监控
 
-- 音频切片临时保存在 `chunks/` 目录（处理后自动删除）
-- ffmpeg 日志保存在 `chunks/ffmpeg.log`
-- 检测到关键词时，钉钉群收到消息：
+- 音频切片临时保存在 `chunks/` 目录（处理后自动删除），ffmpeg 日志保存在 `chunks/ffmpeg.log`
+- **转录日志** 永久保存在 `logs/{course_id}_{日期}.txt`，每行格式：
   ```
-  [智云直播监控] 检测到关键词：小测
-  课程：81706
-  转录片段："老师说今天有小测大家准备一下..."
+  [14:22:45] 同学们今天我们讲量词...
+  [14:23:15] 好现在开始小测大家把书收起来...
+  ```
+- 检测到关键词并经 LLM 确认后，钉钉群收到消息：
+  ```
+  [智云直播监控] 触发关键词：小测
+  课程：离散数学理论基础（82312）
   时间：14:23:15
+
+  分析：老师正在宣布进行随堂小测，要求同学收起书本准备答题。
+
+  最近转录：
+  [14:22:15] 那么今天我们来做一个练习...
+  [14:22:45] 同学们今天我们讲量词...
+  [14:23:15] 好现在开始小测大家把书收起来...
   ```
 
 ## 依赖说明
@@ -155,4 +183,5 @@ python main.py monitor --course-id 81706 --model small
 - **直播监控需要 GPU** — small 模型在 CPU 上转录 30s 音频约需 15-45s，可能积压；建议使用 CUDA
 - **Token 过期** — `ZJU_TOKEN` 约 24 小时过期，过期后 monitor 命令会报 `未传入token` 错误，需重新获取
 - **钉钉加签** — Webhook 必须启用「加签」安全设置，`DINGTALK_SECRET` 为签名密钥（以 `SEC` 开头）
-- **LLM 费用** — 每次关键词命中会调用一次 LLM API（约 10 tokens），使用 gpt-4o-mini 成本极低
+- **LLM 调用次数** — 每次关键词命中调用一次确认（is/否），确认后再调用一次语境分析；使用 gpt-4o-mini 成本极低
+- **仅支持东区教学楼** — 北区教学楼（`ilive` 类型，如紫金港北楼）使用 WebRTC 互动直播系统，暂不支持
