@@ -291,6 +291,7 @@ def confirm_with_llm(
     api_base: str,
     api_key: str,
     model: str,
+    keywords: list[str] | None = None,
     fail_open: bool = True,
     debug: bool = False,
 ) -> bool:
@@ -302,6 +303,7 @@ def confirm_with_llm(
         api_base:  OpenAI-compatible API base URL
         api_key:   API key
         model:     Model name / ID
+        keywords:  All configured keywords; LLM checks each one explicitly.
         fail_open: If True, return True (alert) when the API is unavailable.
                    Prefer not to miss an event over a false positive.
 
@@ -312,10 +314,18 @@ def confirm_with_llm(
         from openai import OpenAI
 
         client = OpenAI(api_key=api_key, base_url=api_base)
-        prompt = (
-            f"以下是课堂录音的转录文字片段：\n\n{text}\n\n"
-            '请判断老师是否正在宣布点名、考勤或小测。只回答"是"或"否"，不要解释。'
-        )
+        if keywords:
+            kw_str = "、".join(keywords)
+            prompt = (
+                f"以下是课堂录音的转录文字片段：\n\n{text}\n\n"
+                f"请逐一判断老师是否正在宣布以下任意一项内容：{kw_str}。\n"
+                '只要有任意一项符合，就回答"是"；全部不符合才回答"否"。只回答"是"或"否"，不要解释。'
+            )
+        else:
+            prompt = (
+                f"以下是课堂录音的转录文字片段：\n\n{text}\n\n"
+                '请判断老师是否正在宣布点名、考勤或小测。只回答"是"或"否"，不要解释。'
+            )
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
@@ -339,8 +349,49 @@ def confirm_with_llm(
 
 
 # ---------------------------------------------------------------------------
-# Alert message builder
+# Playback-generating status check
 # ---------------------------------------------------------------------------
+
+
+def is_playback_generating(session: requests.Session, course_id: str) -> bool:
+    """
+    Return True if the course has transitioned to "回放生成中" (playback generating).
+
+    Checks the catalogue API for any item whose status indicates the live
+    session ended and a playback is being generated.  The known status values
+    are: '1' = live, '2' = playback ready, '3' = playback generating (or
+    similar post-live states).  We treat any non-live, non-empty status that
+    is NOT '0' (not started) and NOT '2' (playback ready) as "generating",
+    but also accept the title/description containing the Chinese phrase.
+    """
+    try:
+        resp = session.get(CATALOGUE_API, params={"course_id": course_id})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.error("catalogue API request failed during status check: %s", exc)
+        return False
+
+    if not data.get("success") or not data.get("result", {}).get("data"):
+        return False
+
+    for item in data["result"]["data"]:
+        status = str(item.get("status", ""))
+        title = item.get("title", "")
+        # status '3' is "回放生成中" on Zhiyun; also catch it via title text
+        if status == "3":
+            print(f"[monitor] Item '{title}' status=3 (回放生成中)")
+            return True
+        # Fallback: check title/description text
+        for field in ("title", "description", "status_text"):
+            if "回放生成" in str(item.get(field, "")):
+                print(f"[monitor] Item '{title}' contains '回放生成中' in {field!r}")
+                return True
+
+    return False
+
+
+
 
 
 def _build_message(
@@ -475,6 +526,8 @@ def monitor_loop(
 
     recent_entries: deque[str] = deque(maxlen=5)  # rolling last-5-chunks buffer
     last_alert_time = 0.0
+    consecutive_empty = 0
+    EMPTY_THRESHOLD = 5  # consecutive silent chunks before checking live status
 
     while True:
         # Check if stream is still live
@@ -495,7 +548,19 @@ def monitor_loop(
                     full_text = " ".join(seg.text for seg in segments)
 
                     if not full_text.strip():
+                        consecutive_empty += 1
+                        if consecutive_empty >= EMPTY_THRESHOLD:
+                            print(
+                                f"[monitor] {consecutive_empty} consecutive empty chunks — "
+                                "checking if stream ended (回放生成中)..."
+                            )
+                            if is_playback_generating(session, course_id):
+                                print("[monitor] Course is now 回放生成中. Stopping monitor.")
+                                return
+                            consecutive_empty = 0  # reset after check
                         continue
+
+                    consecutive_empty = 0
 
                     # Log every chunk permanently
                     ts = datetime.now().strftime("%H:%M:%S")
@@ -523,7 +588,7 @@ def monitor_loop(
                     print(
                         f"[monitor] Keyword '{kw}' matched (score={score:.0f}), confirming with LLM..."
                     )
-                    if confirm_with_llm(full_text, **llm_config, debug=debug):
+                    if confirm_with_llm(full_text, **llm_config, keywords=keywords, debug=debug):
                         analysis = analyze_context_with_llm(
                             list(recent_entries), keywords, debug=debug, **llm_config
                         )
