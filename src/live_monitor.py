@@ -33,6 +33,11 @@ SCHEDULE_API = (
 logger = logging.getLogger(__name__)
 
 
+class TokenExpiredError(Exception):
+    """Raised when the ZJU_TOKEN has expired (server returns auth failure)."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Schedule API: auto-discover live courses
 # ---------------------------------------------------------------------------
@@ -76,8 +81,13 @@ def fetch_live_courses(token: str) -> list[dict]:
         raise RuntimeError(f"Schedule API request failed: {exc}") from exc
 
     # Flatten all course items across all days
+    raw_result = data.get("result", {})
+    # Server returns error string in data field when token is expired
+    if isinstance(raw_result.get("data"), str) and "认证失败" in raw_result["data"]:
+        raise TokenExpiredError(raw_result["data"])
+
     live = []
-    for day_entry in data.get("result", {}).get("list", []):
+    for day_entry in raw_result.get("list", []):
         for item in day_entry.get("course", []):
             if str(item.get("status", "")) == "1":
                 course_id = str(item.get("course_id", ""))
@@ -478,6 +488,7 @@ def monitor_loop(
     log_dir: str = "logs",
     course_title: str = "",
     debug: bool = False,
+    credentials: tuple[str, str] | None = None,
 ) -> None:
     """
     Full monitoring pipeline:
@@ -498,8 +509,20 @@ def monitor_loop(
     # --- Phase 1: wait for live stream ---
     print(f"[monitor] Waiting for live stream (course_id={course_id})...")
     live_url = None
+    refresh_attempts = 0
+    MAX_REFRESH_ATTEMPTS = 3
     while live_url is None:
-        live_url = fetch_live_url(session, course_id)
+        try:
+            live_url = fetch_live_url(session, course_id)
+        except TokenExpiredError as exc:
+            if credentials and refresh_attempts < MAX_REFRESH_ATTEMPTS:
+                refresh_attempts += 1
+                print(f"[monitor] Token expired in Phase 1, refreshing... (attempt {refresh_attempts}/{MAX_REFRESH_ATTEMPTS})")
+                from src.auth import refresh_token
+                session, token = refresh_token(*credentials)
+                continue
+            else:
+                raise
         if live_url is None:
             print(f"[monitor] No live stream found, retrying in {poll_interval}s...")
             time.sleep(poll_interval)

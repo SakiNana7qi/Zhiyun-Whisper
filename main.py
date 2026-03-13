@@ -202,7 +202,8 @@ def list_lessons(course_id: str):
               help="Print each chunk's transcription to stdout")
 def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_dir, log_dir, debug):
     """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
-    from src.live_monitor import monitor_loop, fetch_live_courses
+    from src.live_monitor import monitor_loop, fetch_live_courses, TokenExpiredError
+    from src.auth import refresh_token
 
     # DingTalk config — webhook and secret are required
     webhook = os.getenv("DINGTALK_WEBHOOK", "").strip().strip('"')
@@ -246,23 +247,43 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
     session = _get_session()
 
     token = os.getenv("ZJU_TOKEN", "").strip().strip('"')
+    username = os.getenv("ZJU_USERNAME", "").strip().strip('"')
+    password = os.getenv("ZJU_PASSWORD", "").strip().strip('"')
+    credentials = (username, password) if username and password else None
+
     if not token:
-        click.echo(
-            "Error: ZJU_TOKEN must be set in .env\n"
-            "  Get it from browser DevTools → Network → any XHR to classroom.zju.edu.cn → Authorization header (drop the 'Bearer ' prefix)",
-            err=True,
-        )
-        sys.exit(1)
-    session.headers.update({"Authorization": f"Bearer {token}"})
+        if credentials:
+            click.echo("ZJU_TOKEN not set, attempting login with ZJU_USERNAME/ZJU_PASSWORD...")
+            session, token = refresh_token(*credentials)
+        else:
+            click.echo(
+                "Error: ZJU_TOKEN must be set in .env\n"
+                "  Get it from browser DevTools → Network → any XHR to classroom.zju.edu.cn → Authorization header (drop the 'Bearer ' prefix)",
+                err=True,
+            )
+            sys.exit(1)
+    else:
+        session.headers.update({"Authorization": f"Bearer {token}"})
 
     course_title = ""
 
     # Auto-detect course_id from live schedule if not provided
     if not course_id:
         click.echo("No --course-id given, polling schedule until a live course appears...")
+        refresh_attempts = 0
+        MAX_REFRESH_ATTEMPTS = 3
         while not course_id:
             try:
                 live_courses = fetch_live_courses(token)
+            except TokenExpiredError:
+                if credentials and refresh_attempts < MAX_REFRESH_ATTEMPTS:
+                    refresh_attempts += 1
+                    click.echo(f"[monitor] Token expired during auto-detect, refreshing... (attempt {refresh_attempts}/{MAX_REFRESH_ATTEMPTS})")
+                    session, token = refresh_token(*credentials)
+                    continue
+                else:
+                    click.echo("Token expired and no credentials available to refresh.", err=True)
+                    sys.exit(1)
             except Exception as exc:
                 click.echo(f"Error fetching schedule: {exc}", err=True)
                 sys.exit(1)
@@ -294,6 +315,7 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
         chunks_dir=chunks_dir,
         log_dir=log_dir,
         debug=debug,
+        credentials=credentials,
     )
 
 

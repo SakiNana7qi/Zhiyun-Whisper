@@ -11,6 +11,7 @@
 - **实时直播监控** — 检测「小测、点到、考勤」等关键词，通过钉钉机器人推送提醒
 - **自动检测当前直播** — 无需手动指定课程 ID，从课表自动发现正在直播的课程
 - **持久转录日志** — 每次直播的全文转录按课程+日期写入 `logs/` 目录永久保存
+- **Token 自动刷新** — 设置 `ZJU_USERNAME`/`ZJU_PASSWORD` 后，监控进程检测到 Token 过期时自动重新登录，无需人工干预
 
 ## 前置条件
 
@@ -36,8 +37,8 @@ pip install -r requirements.txt
 
 ```env
 ZJU_USERNAME="你的学号"
-ZJU_PASSWORD="你的密码"
-ZJU_TOKEN=""   # 直播监控需要，见下方说明
+ZJU_PASSWORD="你的密码"   # 设置后 Token 过期时自动刷新，无需手动更新
+ZJU_TOKEN=""   # 可选：手动填入则优先使用；为空时由账号密码自动登录获取
 
 # 仅 API 模式需要
 OPENAI_API_KEY="sk-..."
@@ -55,13 +56,22 @@ LLM_MODEL="gpt-4o-mini"
 
 ### 获取 ZJU_TOKEN（直播监控必需）
 
-1. 浏览器打开智云课堂任意直播页面并登录
+**方式一：自动获取（推荐）**
+
+在 `.env` 中设置 `ZJU_USERNAME` 和 `ZJU_PASSWORD`，**无需填写 `ZJU_TOKEN`**。
+程序启动时自动登录 ZJU 统一身份认证，获取并维护 Token，过期后自动刷新。
+
+**方式二：手动获取**
+
+1. 浏览器打开智云课堂任意页面并登录
 2. 打开 DevTools (F12) → Network 标签
 3. 刷新页面，找到任意 XHR 请求
 4. 查看 Request Headers → `Authorization: Bearer <token>`
 5. 复制 `Bearer` 后面的 JWT 字符串到 `.env` 的 `ZJU_TOKEN`
 
-Token 有效期约 24 小时，过期后需重新获取。
+手动填入的 Token 有效期约 24 小时；若同时设置了账号密码，过期时仍会自动刷新。
+
+> 技术细节见 [docs/zju-cas-auth.md](docs/zju-cas-auth.md)。
 
 ### HuggingFace 镜像（国内用户必配）
 
@@ -181,7 +191,7 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 ## 注意事项
 
 - **直播监控需要 GPU** — small 模型在 CPU 上转录 30s 音频约需 15-45s，可能积压；建议使用 CUDA
-- **Token 过期** — `ZJU_TOKEN` 约 24 小时过期，过期后 monitor 命令会报 `未传入token` 错误，需重新获取
+- **Token 自动刷新** — 设置 `ZJU_USERNAME`/`ZJU_PASSWORD` 后，Token 过期时 monitor 自动重新登录（最多重试 3 次）；若未设置账号密码，过期后进程退出
 - **钉钉加签** — Webhook 必须启用「加签」安全设置，`DINGTALK_SECRET` 为签名密钥（以 `SEC` 开头）
 - **LLM 调用次数** — 每次关键词命中调用一次确认（is/否），确认后再调用一次语境分析；使用 gpt-4o-mini 成本极低
 - **仅支持东区教学楼** — 北区教学楼（`ilive` 类型，如紫金港北楼）使用 WebRTC 互动直播系统，暂不支持
