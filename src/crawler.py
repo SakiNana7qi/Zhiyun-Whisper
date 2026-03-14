@@ -21,6 +21,7 @@ CATALOGUE_API = "https://classroom.zju.edu.cn/courseapi/v2/course/catalogue"
 @dataclass
 class Lesson:
     """Represents a single lesson/recording in a course."""
+
     sub_id: str
     title: str
     video_url: str | None
@@ -97,8 +98,7 @@ def _check_ffmpeg():
     """Verify ffmpeg is available on PATH."""
     if not shutil.which("ffmpeg"):
         raise RuntimeError(
-            "ffmpeg not found on PATH. "
-            "Install it: https://ffmpeg.org/download.html"
+            "ffmpeg not found on PATH. " "Install it: https://ffmpeg.org/download.html"
         )
 
 
@@ -130,7 +130,9 @@ def _download_video(
         return
 
     if downloaded > 0:
-        print(f"  Resuming download from {downloaded / (1024*1024):.0f}/{total_mb:.0f} MB")
+        print(
+            f"  Resuming download from {downloaded / (1024*1024):.0f}/{total_mb:.0f} MB"
+        )
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -156,7 +158,8 @@ def _download_video(
                         dl_mb = downloaded / (1024 * 1024)
                         print(
                             f"\r  Progress: {dl_mb:.0f}/{total_mb:.0f} MB ({pct:.1f}%)",
-                            end="", flush=True,
+                            end="",
+                            flush=True,
                         )
 
             print()
@@ -169,12 +172,13 @@ def _download_video(
             dl_mb = downloaded / (1024 * 1024)
 
             if attempt < max_retries:
-                wait = min(2 ** attempt, 30)
+                wait = min(2**attempt, 30)
                 print(
                     f"\n  Connection lost at {dl_mb:.0f} MB. "
                     f"Retry {attempt}/{max_retries} in {wait}s..."
                 )
                 import time
+
                 time.sleep(wait)
             else:
                 raise RuntimeError(
@@ -186,24 +190,36 @@ def _download_video(
 def _extract_audio(video_path: str, audio_path: str) -> None:
     """Extract audio from a local video file as 16kHz mono WAV."""
     cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
         "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "16000",
-        "-ac", "1",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
         audio_path,
     ]
-    result = subprocess.run(
+    # Use Popen to stream stderr so progress is visible and doesn't buffer
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
-    if result.returncode != 0:
+    stderr_lines = []
+    for line in proc.stderr:
+        stderr_lines.append(line)
+        print(f"\r  {line.rstrip()}", end="", flush=True)
+    proc.wait()
+    print()
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"ffmpeg failed (exit code {result.returncode}):\n{result.stderr[-1000:]}"
+            f"ffmpeg failed (exit code {proc.returncode}):\n{''.join(stderr_lines[-20:])}"
         )
 
 
