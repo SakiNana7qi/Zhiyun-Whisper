@@ -100,6 +100,9 @@ python main.py transcribe "URL" --mode api
 # 指定模型大小（tiny/base/small/medium/large-v3）
 python main.py transcribe "URL" --mode local --model medium
 
+# 调整批处理大小（GPU 显存充足时可调高以加速，默认 16）
+python main.py transcribe "URL" --batch-size 32
+
 # 列出某门课所有课次
 python main.py list --course-id 81771
 ```
@@ -131,7 +134,10 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 |------|--------|------|
 | `--course-id` | 自动检测 | 课程 ID，省略时从课表自动发现直播 |
 | `--keywords` | `小测,点到,考勤,点名,学在浙大,quiz,雷达` | 逗号分隔的关键词 |
-| `--model` | `small` | Whisper 模型大小 |
+| `--model` | `large-v3` | Whisper 模型大小（tiny/base/small/medium/large-v3） |
+| `--batch-size` | `16` | 本地推理批处理大小，GPU 显存充足时可调高（如 32）加速，CPU 模式设为 1 |
+| `--language` | `zh` | 转录语言代码 |
+| `--output-dir` | `output` | 输出目录 |
 | `--chunk-duration` | `30` | 每段音频长度（秒） |
 | `--poll-interval` | `15` | 无直播时轮询间隔（秒） |
 | `--chunks-dir` | `chunks` | 临时音频切片目录（处理后删除） |

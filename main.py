@@ -31,16 +31,20 @@ def _get_session(require_auth: bool = False) -> "requests.Session":
     set require_auth=True.
     """
     import requests
+
     session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    })
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+    )
     if require_auth:
         from src.auth import login
+
         username, password = _get_credentials()
         session = login(username, password)
     return session
@@ -55,7 +59,8 @@ def cli():
 @cli.command()
 @click.argument("url")
 @click.option(
-    "--mode", "-m",
+    "--mode",
+    "-m",
     type=click.Choice(["local", "api"]),
     default="local",
     help="Transcription backend: local (faster-whisper) or api (OpenAI)",
@@ -66,16 +71,27 @@ def cli():
     help="Whisper model size for local mode (tiny/base/small/medium/large-v3)",
 )
 @click.option(
-    "--language", "-l",
+    "--language",
+    "-l",
     default="zh",
     help="Language code for transcription",
 )
 @click.option(
-    "--output-dir", "-o",
+    "--output-dir",
+    "-o",
     default="output",
     help="Output directory for audio and transcription files",
 )
-def transcribe(url: str, mode: str, model: str, language: str, output_dir: str):
+@click.option(
+    "--batch-size",
+    default=16,
+    type=int,
+    show_default=True,
+    help="Batch size for local Whisper inference (higher = faster on GPU, more VRAM)",
+)
+def transcribe(
+    url: str, mode: str, model: str, language: str, output_dir: str, batch_size: int
+):
     """Transcribe a Zhiyun Classroom lesson from URL."""
     from src.crawler import parse_url, fetch_lessons, download_audio
     from src.transcriber import transcribe_local, transcribe_api
@@ -104,7 +120,9 @@ def transcribe(url: str, mode: str, model: str, language: str, output_dir: str):
                 target = lesson
                 break
         if not target:
-            click.echo(f"  Error: sub_id={sub_id} not found in course catalogue", err=True)
+            click.echo(
+                f"  Error: sub_id={sub_id} not found in course catalogue", err=True
+            )
             click.echo(f"  Available lessons:")
             for l in lessons:
                 status = "available" if l.video_url else "no playback"
@@ -139,11 +157,14 @@ def transcribe(url: str, mode: str, model: str, language: str, output_dir: str):
             audio_path=audio_path,
             model_size=model,
             language=language,
+            batch_size=batch_size,
         )
     else:
         api_key = os.getenv("OPENAI_API_KEY", "").strip().strip('"')
         if not api_key:
-            click.echo("Error: OPENAI_API_KEY must be set in .env for API mode", err=True)
+            click.echo(
+                "Error: OPENAI_API_KEY must be set in .env for API mode", err=True
+            )
             sys.exit(1)
         segments = transcribe_api(
             audio_path=audio_path,
@@ -161,7 +182,8 @@ def transcribe(url: str, mode: str, model: str, language: str, output_dir: str):
 
 @cli.command("list")
 @click.option(
-    "--course-id", "-c",
+    "--course-id",
+    "-c",
     required=True,
     help="Course ID from the classroom URL",
 )
@@ -185,22 +207,67 @@ def list_lessons(course_id: str):
 
 
 @cli.command()
-@click.option("--course-id", "-c", default=None, help="Course ID from the classroom URL (auto-detected if omitted)")
-@click.option("--keywords", "-k", default="小测,点到,考勤,点名,学在浙大,quiz,雷达", show_default=True,
-              help="Comma-separated list of keywords to watch for")
-@click.option("--chunk-duration", default=30, type=int, show_default=True,
-              help="Audio chunk length in seconds")
-@click.option("--model", default="small", show_default=True,
-              help="Whisper model size (tiny/base/small/medium/large-v3)")
-@click.option("--poll-interval", default=15, type=int, show_default=True,
-              help="Seconds between live-stream checks when no stream is active")
-@click.option("--chunks-dir", default="chunks", show_default=True,
-              help="Directory for temporary audio chunk files")
-@click.option("--log-dir", default="logs", show_default=True,
-              help="Directory for persistent transcript logs")
-@click.option("--debug", is_flag=True, default=False,
-              help="Print each chunk's transcription to stdout")
-def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_dir, log_dir, debug):
+@click.option(
+    "--course-id",
+    "-c",
+    default=None,
+    help="Course ID from the classroom URL (auto-detected if omitted)",
+)
+@click.option(
+    "--keywords",
+    "-k",
+    default="小测,点到,考勤,点名,学在浙大,quiz,雷达",
+    show_default=True,
+    help="Comma-separated list of keywords to watch for",
+)
+@click.option(
+    "--chunk-duration",
+    default=30,
+    type=int,
+    show_default=True,
+    help="Audio chunk length in seconds",
+)
+@click.option(
+    "--model",
+    default="small",
+    show_default=True,
+    help="Whisper model size (tiny/base/small/medium/large-v3)",
+)
+@click.option(
+    "--poll-interval",
+    default=15,
+    type=int,
+    show_default=True,
+    help="Seconds between live-stream checks when no stream is active",
+)
+@click.option(
+    "--chunks-dir",
+    default="chunks",
+    show_default=True,
+    help="Directory for temporary audio chunk files",
+)
+@click.option(
+    "--log-dir",
+    default="logs",
+    show_default=True,
+    help="Directory for persistent transcript logs",
+)
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help="Print each chunk's transcription to stdout",
+)
+def monitor(
+    course_id,
+    keywords,
+    chunk_duration,
+    model,
+    poll_interval,
+    chunks_dir,
+    log_dir,
+    debug,
+):
     """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
     from src.live_monitor import monitor_loop, fetch_live_courses, TokenExpiredError
     from src.auth import refresh_token
@@ -253,7 +320,9 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
 
     if not token:
         if credentials:
-            click.echo("ZJU_TOKEN not set, attempting login with ZJU_USERNAME/ZJU_PASSWORD...")
+            click.echo(
+                "ZJU_TOKEN not set, attempting login with ZJU_USERNAME/ZJU_PASSWORD..."
+            )
             session, token = refresh_token(*credentials)
         else:
             click.echo(
@@ -269,7 +338,9 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
 
     # Auto-detect course_id from live schedule if not provided
     if not course_id:
-        click.echo("No --course-id given, polling schedule until a live course appears...")
+        click.echo(
+            "No --course-id given, polling schedule until a live course appears..."
+        )
         refresh_attempts = 0
         MAX_REFRESH_ATTEMPTS = 3
         while not course_id:
@@ -278,11 +349,16 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
             except TokenExpiredError:
                 if credentials and refresh_attempts < MAX_REFRESH_ATTEMPTS:
                     refresh_attempts += 1
-                    click.echo(f"[monitor] Token expired during auto-detect, refreshing... (attempt {refresh_attempts}/{MAX_REFRESH_ATTEMPTS})")
+                    click.echo(
+                        f"[monitor] Token expired during auto-detect, refreshing... (attempt {refresh_attempts}/{MAX_REFRESH_ATTEMPTS})"
+                    )
                     session, token = refresh_token(*credentials)
                     continue
                 else:
-                    click.echo("Token expired and no credentials available to refresh.", err=True)
+                    click.echo(
+                        "Token expired and no credentials available to refresh.",
+                        err=True,
+                    )
                     sys.exit(1)
             except Exception as exc:
                 click.echo(f"Error fetching schedule: {exc}", err=True)
@@ -290,7 +366,9 @@ def monitor(course_id, keywords, chunk_duration, model, poll_interval, chunks_di
 
             if not live_courses:
                 click.echo(f"No live courses yet, retrying in {poll_interval}s...")
-                import time; time.sleep(poll_interval)
+                import time
+
+                time.sleep(poll_interval)
             elif len(live_courses) == 1:
                 course_id = live_courses[0]["course_id"]
                 course_title = live_courses[0]["title"]

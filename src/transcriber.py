@@ -17,8 +17,9 @@ from dataclasses import dataclass
 @dataclass
 class Segment:
     """A transcribed text segment with timestamps."""
+
     start: float  # seconds
-    end: float    # seconds
+    end: float  # seconds
     text: str
 
 
@@ -26,6 +27,7 @@ def transcribe_with_model(
     model: "WhisperModel",
     audio_path: str,
     language: str = "zh",
+    batch_size: int = 16,
 ) -> list[Segment]:
     """
     Transcribe audio using an already-loaded WhisperModel instance.
@@ -44,17 +46,23 @@ def transcribe_with_model(
     from tqdm import tqdm
 
     print(f"  Transcribing: {audio_path}")
-    segments_gen, info = model.transcribe(
+    from faster_whisper import BatchedInferencePipeline
+
+    batched_model = BatchedInferencePipeline(model=model)
+    segments_gen, info = batched_model.transcribe(
         audio_path,
         language=language,
-        beam_size=5,
+        beam_size=1,
         vad_filter=True,
+        batch_size=batch_size,
     )
 
     duration = info.duration
     if duration is None or duration <= 0:
         duration = 1.0  # fallback for corrupted/empty audio
-    print(f"  Detected language: {info.language} (prob={info.language_probability:.2f})")
+    print(
+        f"  Detected language: {info.language} (prob={info.language_probability:.2f})"
+    )
     print(f"  Audio duration: {duration / 60:.1f} min")
 
     total_sec = max(1, int(duration))
@@ -66,7 +74,9 @@ def transcribe_with_model(
         for seg in segments_gen:
             seg_start = seg.start if seg.start is not None else last_pos
             seg_end = seg.end if seg.end is not None else seg_start
-            segments.append(Segment(start=seg_start, end=seg_end, text=seg.text.strip()))
+            segments.append(
+                Segment(start=seg_start, end=seg_end, text=seg.text.strip())
+            )
             advance = min(seg_end, duration) - last_pos
             if advance > 0:
                 pbar.update(advance)
@@ -86,6 +96,7 @@ def transcribe_local(
     model_size: str = "large-v3",
     device: str = "auto",
     language: str = "zh",
+    batch_size: int = 16,
 ) -> list[Segment]:
     """
     Transcribe audio using faster-whisper (local model).
@@ -104,6 +115,7 @@ def transcribe_local(
     if device == "auto":
         try:
             import torch
+
             device = "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             device = "cpu"
@@ -113,14 +125,16 @@ def transcribe_local(
     print(f"  Loading model: {model_size} (device={device}, compute={compute_type})")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-    return transcribe_with_model(model, audio_path, language)
+    return transcribe_with_model(model, audio_path, language, batch_size)
 
 
 # OpenAI Whisper API has a 25 MB file size limit
 _API_MAX_FILE_SIZE = 25 * 1024 * 1024
 
 
-def _split_audio_for_api(audio_path: str, max_size: int = _API_MAX_FILE_SIZE) -> list[str]:
+def _split_audio_for_api(
+    audio_path: str, max_size: int = _API_MAX_FILE_SIZE
+) -> list[str]:
     """
     Split a large audio file into chunks under max_size bytes.
     Returns list of chunk file paths.
@@ -139,9 +153,18 @@ def _split_audio_for_api(audio_path: str, max_size: int = _API_MAX_FILE_SIZE) ->
     bytes_per_sec = 32000
     chunk_duration = max(60, int(max_size / bytes_per_sec))
     total_duration_result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-        capture_output=True, text=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ],
+        capture_output=True,
+        text=True,
     )
     total_duration = float(total_duration_result.stdout.strip())
     num_chunks = math.ceil(total_duration / chunk_duration)
@@ -152,11 +175,25 @@ def _split_audio_for_api(audio_path: str, max_size: int = _API_MAX_FILE_SIZE) ->
         start_time = i * chunk_duration
         chunk_path = f"{base}_chunk{i:03d}{ext}"
         subprocess.run(
-            ["ffmpeg", "-y", "-i", audio_path,
-             "-ss", str(start_time), "-t", str(chunk_duration),
-             "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-             chunk_path],
-            capture_output=True, text=True,
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                audio_path,
+                "-ss",
+                str(start_time),
+                "-t",
+                str(chunk_duration),
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                chunk_path,
+            ],
+            capture_output=True,
+            text=True,
         )
         chunks.append(chunk_path)
 
@@ -204,25 +241,39 @@ def transcribe_api(
 
         if hasattr(response, "segments") and response.segments:
             for seg in response.segments:
-                all_segments.append(Segment(
-                    start=seg["start"] + time_offset,
-                    end=seg["end"] + time_offset,
-                    text=seg["text"].strip(),
-                ))
+                all_segments.append(
+                    Segment(
+                        start=seg["start"] + time_offset,
+                        end=seg["end"] + time_offset,
+                        text=seg["text"].strip(),
+                    )
+                )
         elif hasattr(response, "text") and response.text:
-            all_segments.append(Segment(
-                start=time_offset,
-                end=time_offset + 30.0,
-                text=response.text.strip(),
-            ))
+            all_segments.append(
+                Segment(
+                    start=time_offset,
+                    end=time_offset + 30.0,
+                    text=response.text.strip(),
+                )
+            )
 
         if len(chunks) > 1 and chunk_path != audio_path:
             # Calculate offset for next chunk from file duration
             import subprocess
+
             dur_result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", chunk_path],
-                capture_output=True, text=True,
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    chunk_path,
+                ],
+                capture_output=True,
+                text=True,
             )
             time_offset += float(dur_result.stdout.strip())
 
