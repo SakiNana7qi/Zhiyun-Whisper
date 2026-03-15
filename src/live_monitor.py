@@ -22,6 +22,7 @@ from typing import Generator
 import requests
 
 from src.crawler import CATALOGUE_API
+from src.session_utils import mount_legacy_ssl
 
 GET_SUB_INFO_API = (
     "https://classroom.zju.edu.cn/courseapi/v3/portal-home-setting/get-sub-info"
@@ -31,6 +32,13 @@ SCHEDULE_API = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _make_schedule_session() -> requests.Session:
+    """Return a session with DHFix adapter for yjapi.cmc.zju.edu.cn."""
+    s = requests.Session()
+    mount_legacy_ssl(s)
+    return s
 
 
 class TokenExpiredError(Exception):
@@ -64,7 +72,8 @@ def fetch_live_courses(token: str) -> list[dict]:
 
     today = date.today().isoformat()
     try:
-        resp = requests.get(
+        _sched_session = _make_schedule_session()
+        resp = _sched_session.get(
             SCHEDULE_API,
             params={
                 "user_id": user_id,

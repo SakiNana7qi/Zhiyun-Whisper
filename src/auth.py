@@ -12,6 +12,7 @@ Flow:
 import json
 import requests
 from bs4 import BeautifulSoup
+from src.session_utils import mount_legacy_ssl
 
 CAS_LOGIN_URL = "https://zjuam.zju.edu.cn/cas/login"
 CAS_PUBKEY_URL = "https://zjuam.zju.edu.cn/cas/v2/getPubKey"
@@ -121,6 +122,7 @@ def login(username: str, password: str) -> requests.Session:
         RuntimeError: If login fails
     """
     session = requests.Session()
+    mount_legacy_ssl(session)
     session.headers.update({
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
