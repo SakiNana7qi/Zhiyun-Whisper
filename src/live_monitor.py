@@ -372,16 +372,12 @@ def confirm_with_llm(
 # ---------------------------------------------------------------------------
 
 
-def is_playback_generating(session: requests.Session, course_id: str) -> bool:
+def is_stream_ended(session: requests.Session, course_id: str) -> bool:
     """
-    Return True if the course has transitioned to "回放生成中" (playback generating).
+    Return True if the live stream has ended.
 
-    Checks the catalogue API for any item whose status indicates the live
-    session ended and a playback is being generated.  The known status values
-    are: '1' = live, '2' = playback ready, '3' = playback generating (or
-    similar post-live states).  We treat any non-live, non-empty status that
-    is NOT '0' (not started) and NOT '2' (playback ready) as "generating",
-    but also accept the title/description containing the Chinese phrase.
+    Status values: '1' = live, '2' = playback ready, '3' = playback generating.
+    We treat status '2' or '3' (or title text containing '回放') as stream ended.
     """
     try:
         resp = session.get(CATALOGUE_API, params={"course_id": course_id})
@@ -397,14 +393,15 @@ def is_playback_generating(session: requests.Session, course_id: str) -> bool:
     for item in data["result"]["data"]:
         status = str(item.get("status", ""))
         title = item.get("title", "")
-        # status '3' is "回放生成中" on Zhiyun; also catch it via title text
         if status == "3":
             print(f"[monitor] Item '{title}' status=3 (回放生成中)")
             return True
-        # Fallback: check title/description text
+        if status == "2":
+            print(f"[monitor] Item '{title}' status=2 (回放已就绪)")
+            return True
         for field in ("title", "description", "status_text"):
-            if "回放生成" in str(item.get(field, "")):
-                print(f"[monitor] Item '{title}' contains '回放生成中' in {field!r}")
+            if "回放" in str(item.get(field, "")):
+                print(f"[monitor] Item '{title}' contains '回放' in {field!r}")
                 return True
 
     return False
@@ -584,10 +581,10 @@ def monitor_loop(
                         if consecutive_empty >= EMPTY_THRESHOLD:
                             print(
                                 f"[monitor] {consecutive_empty} consecutive empty chunks — "
-                                "checking if stream ended (回放生成中)..."
+                                "checking if stream ended..."
                             )
-                            if is_playback_generating(session, course_id):
-                                print("[monitor] Course is now 回放生成中. Stopping monitor.")
+                            if is_stream_ended(session, course_id):
+                                print("[monitor] Stream ended. Stopping monitor.")
                                 return
                             consecutive_empty = 0  # reset after check
                         continue
