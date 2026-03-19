@@ -337,13 +337,13 @@ def confirm_with_llm(
             kw_str = "、".join(keywords)
             prompt = (
                 f"以下是课堂录音的转录文字片段：\n\n{text}\n\n"
-                f"请逐一判断老师是否正在宣布以下任意一项内容：{kw_str}。\n"
-                '只要有任意一项符合，就回答"是"；全部不符合才回答"否"。只回答"是"或"否"，不要解释。'
+                f"请判断文字中是否出现或提及了以下任意一项内容：{kw_str}。\n"
+                '只要有任意一项被提及（无论老师是否正在执行），就回答"是"；全部未提及才回答"否"。只回答"是"或"否"，不要解释。'
             )
         else:
             prompt = (
                 f"以下是课堂录音的转录文字片段：\n\n{text}\n\n"
-                '请判断老师是否正在宣布点名、考勤或小测。只回答"是"或"否"，不要解释。'
+                '请判断文字中是否出现或提及了点名、考勤或小测相关内容。只回答"是"或"否"，不要解释。'
             )
         resp = client.chat.completions.create(
             model=model,
@@ -617,7 +617,13 @@ def monitor_loop(
                     print(
                         f"[monitor] Keyword '{kw}' matched (score={score:.0f}), confirming with LLM..."
                     )
-                    if confirm_with_llm(full_text, **llm_config, keywords=keywords, debug=debug):
+                    # Skip LLM if keyword appears verbatim in the transcription
+                    confirmed = kw in full_text or confirm_with_llm(
+                        full_text, **llm_config, keywords=keywords, debug=debug
+                    )
+                    if kw in full_text:
+                        print(f"[monitor] Keyword '{kw}' found verbatim, skipping LLM")
+                    if confirmed:
                         analysis = analyze_context_with_llm(
                             list(recent_entries), keywords, debug=debug, **llm_config
                         )

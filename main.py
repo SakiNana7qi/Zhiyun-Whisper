@@ -216,7 +216,7 @@ def list_lessons(course_id: str):
 @click.option(
     "--keywords",
     "-k",
-    default="小测,点到,考勤,点名,学在浙大,quiz,雷达",
+    default="小测,点到,考勤,点名,随堂测试,学在浙大,quiz,雷达",
     show_default=True,
     help="Comma-separated list of keywords to watch for",
 )
