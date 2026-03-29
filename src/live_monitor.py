@@ -115,9 +115,9 @@ def fetch_live_courses(token: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_live_url(session: requests.Session, course_id: str) -> str | None:
+def fetch_live_url(session: requests.Session, course_id: str) -> tuple[str, str] | None:
     """
-    Return the HLS m3u8 URL for the currently live session of a course.
+    Return (m3u8_url, live_sub_id) for the currently live session, or None.
 
     Two-step process:
     1. Catalogue API  → find the item with status='1' (live), get its sub_id
@@ -162,13 +162,11 @@ def fetch_live_url(session: requests.Session, course_id: str) -> str | None:
     try:
         m3u8_url = info["data"]["live_url"]["output"]["m3u8"]
         if m3u8_url:
-            return m3u8_url
+            return m3u8_url, live_sub_id
     except (KeyError, TypeError):
         pass
 
     logger.error("live_url.output.m3u8 not found in get-sub-info response: %s", info)
-    return None
-
     return None
 
 
@@ -372,12 +370,13 @@ def confirm_with_llm(
 # ---------------------------------------------------------------------------
 
 
-def is_stream_ended(session: requests.Session, course_id: str) -> bool:
+def is_stream_ended(session: requests.Session, course_id: str, live_sub_id: str) -> bool:
     """
-    Return True if the live stream has ended.
+    Return True if the monitored sub_id has ended.
 
+    Only checks the specific sub_id that was live when monitoring started,
+    so other already-finished items in the same course don't cause false exits.
     Status values: '1' = live, '2' = playback ready, '3' = playback generating.
-    We treat status '2' or '3' (or title text containing '回放') as stream ended.
     """
     try:
         resp = session.get(CATALOGUE_API, params={"course_id": course_id})
@@ -391,6 +390,8 @@ def is_stream_ended(session: requests.Session, course_id: str) -> bool:
         return False
 
     for item in data["result"]["data"]:
+        if str(item.get("sub_id", item.get("id", ""))) != live_sub_id:
+            continue
         status = str(item.get("status", ""))
         title = item.get("title", "")
         if status == "3":
@@ -519,21 +520,23 @@ def monitor_loop(
     MAX_REFRESH_ATTEMPTS = 3
     while live_url is None:
         try:
-            live_url = fetch_live_url(session, course_id)
+            result = fetch_live_url(session, course_id)
         except TokenExpiredError as exc:
             if credentials and refresh_attempts < MAX_REFRESH_ATTEMPTS:
                 refresh_attempts += 1
                 print(f"[monitor] Token expired in Phase 1, refreshing... (attempt {refresh_attempts}/{MAX_REFRESH_ATTEMPTS})")
                 from src.auth import refresh_token
-                session, token = refresh_token(*credentials)
+                session, _ = refresh_token(*credentials)
                 continue
             else:
                 raise
-        if live_url is None:
+        if result is None:
             print(f"[monitor] No live stream found, retrying in {poll_interval}s...")
             time.sleep(poll_interval)
+        else:
+            live_url, live_sub_id = result
 
-    print(f"[monitor] Live stream detected: {live_url}")
+    print(f"[monitor] Live stream detected: {live_url} (sub_id={live_sub_id})")
 
     # --- Phase 2: load model once ---
     try:
@@ -557,14 +560,20 @@ def monitor_loop(
     last_alert_time = 0.0
     consecutive_empty = 0
     EMPTY_THRESHOLD = 5  # consecutive silent chunks before checking live status
+    last_end_check_time = 0.0
+    END_CHECK_INTERVAL = 60.0  # poll is_stream_ended every 60 seconds
 
     while True:
         # Check if stream is still live
-        current_url = fetch_live_url(session, course_id)
-        if current_url is None:
+        result = fetch_live_url(session, course_id)
+        if result is None:
             print("[monitor] Stream is no longer live (status changed). Exiting.")
             break
 
+        current_url, current_sub_id = result
+        if current_sub_id != live_sub_id:
+            print(f"[monitor] Stream is no longer live (status changed). Exiting.")
+            break
         if current_url != live_url:
             print(f"[monitor] Live URL refreshed (auth_key updated)")
             live_url = current_url
@@ -576,6 +585,14 @@ def monitor_loop(
                     segments = transcribe_with_model(model, chunk_path, language="zh")
                     full_text = " ".join(seg.text for seg in segments)
 
+                    # Periodic end-of-stream check every 60s regardless of content
+                    now = time.time()
+                    if now - last_end_check_time >= END_CHECK_INTERVAL:
+                        last_end_check_time = now
+                        if is_stream_ended(session, course_id, live_sub_id):
+                            print("[monitor] Periodic check: stream ended. Stopping monitor.")
+                            return
+
                     if not full_text.strip():
                         consecutive_empty += 1
                         if consecutive_empty >= EMPTY_THRESHOLD:
@@ -583,7 +600,7 @@ def monitor_loop(
                                 f"[monitor] {consecutive_empty} consecutive empty chunks — "
                                 "checking if stream ended..."
                             )
-                            if is_stream_ended(session, course_id):
+                            if is_stream_ended(session, course_id, live_sub_id):
                                 print("[monitor] Stream ended. Stopping monitor.")
                                 return
                             consecutive_empty = 0  # reset after check
