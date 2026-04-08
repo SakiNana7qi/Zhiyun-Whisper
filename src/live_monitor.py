@@ -159,6 +159,10 @@ def fetch_live_url(session: requests.Session, course_id: str) -> tuple[str, str]
         logger.error("get-sub-info API request failed: %s", exc)
         return None
 
+    # Detect auth failure from get-sub-info API
+    if info.get("code") == 500 and "认证失败" in str(info.get("msg", "")):
+        raise TokenExpiredError(info.get("msg", "用户认证失败"))
+
     try:
         m3u8_url = info["data"]["live_url"]["output"]["m3u8"]
         if m3u8_url:
