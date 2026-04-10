@@ -52,6 +52,9 @@ DINGTALK_AT_MOBILE=""   # 留空则不@任何人
 LLM_API_BASE="https://api.openai.com/v1"
 LLM_API_KEY="sk-xxx"
 LLM_MODEL="gpt-4o-mini"
+
+# 直播监控 - 多课程优先级（逗号分隔的 course_id，靠前的优先）
+MONITOR_PRIORITY="81771,83640"   # 多课程同时直播时自动选择优先级最高的
 ```
 
 ### 获取 ZJU_TOKEN（直播监控必需）
@@ -143,6 +146,14 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 | `--chunks-dir` | `chunks` | 临时音频切片目录（处理后删除） |
 | `--log-dir` | `logs` | 转录日志目录（永久保留） |
 | `--debug` | 关 | 打印每段转录文本和 LLM 响应 |
+
+**多课程自动选择：**
+
+未指定 `--course-id` 且同时有多个直播时，按 `MONITOR_PRIORITY` 自动选择：
+- 优先选择在优先列表中的课程
+- 列表中靠前的优先级更高
+- 若都不在列表中，选择第一个
+- 未设置 `MONITOR_PRIORITY` 时，多课程会提示手动指定
 
 **工作流程：**
 1. 若未指定 `--course-id`，从课表 API 查找 `status='1'` 的直播课，没有则每隔 `--poll-interval` 秒重试

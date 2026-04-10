@@ -311,6 +311,12 @@ def monitor(
     keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
     click.echo(f"Monitoring course {course_id} for keywords: {keyword_list}")
 
+    # Load course priority list from .env
+    priority_raw = os.getenv("MONITOR_PRIORITY", "").strip().strip('"')
+    priority_list = [c.strip() for c in priority_raw.split(",") if c.strip()]
+    if priority_list:
+        click.echo(f"Course priority: {priority_list}")
+
     session = _get_session()
 
     token = os.getenv("ZJU_TOKEN", "").strip().strip('"')
@@ -377,8 +383,30 @@ def monitor(
                 click.echo("Multiple live courses found:")
                 for i, c in enumerate(live_courses, 1):
                     click.echo(f"  {i}. {c['title']} (course_id={c['course_id']})")
-                click.echo("Use --course-id to specify which one to monitor.")
-                sys.exit(0)
+
+                if priority_list:
+                    # Sort: priority list membership first, then order within priority list
+                    def _sort_key(c):
+                        cid = c["course_id"]
+                        if cid in priority_list:
+                            return (0, priority_list.index(cid))
+                        return (1, 0)
+
+                    live_courses.sort(key=_sort_key)
+                    chosen = live_courses[0]
+                    course_id = chosen["course_id"]
+                    course_title = chosen["title"]
+                    in_priority = course_id in priority_list
+                    click.echo(
+                        f"Auto-selected by priority: {course_title} (course_id={course_id})"
+                        + (" [in priority list]" if in_priority else " [not in priority list, using first available]")
+                    )
+                else:
+                    click.echo(
+                        "Use --course-id to specify which one, "
+                        "or set MONITOR_PRIORITY in .env to auto-select."
+                    )
+                    sys.exit(0)
 
     monitor_loop(
         session=session,
