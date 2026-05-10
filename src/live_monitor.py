@@ -195,6 +195,10 @@ def stream_audio_chunks(
                      stops immediately, which unblocks the caller.
     """
     os.makedirs(output_dir, exist_ok=True)
+    # Clean up stale chunk files from previous sessions to avoid false matches
+    for f in os.listdir(output_dir):
+        if f.startswith("chunk_") and f.endswith(".wav"):
+            os.remove(os.path.join(output_dir, f))
     pattern = os.path.join(output_dir, "chunk_%05d.wav")
     ffmpeg_log = os.path.join(output_dir, "ffmpeg.log")
 
