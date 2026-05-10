@@ -183,15 +183,16 @@ def stream_audio_chunks(
     m3u8_url: str,
     output_dir: str,
     chunk_seconds: int = 30,
+    check_alive: "Callable[[], bool] | None" = None,
 ) -> Generator[str, None, None]:
     """
     Run ffmpeg in the background to segment an HLS live stream into WAV files,
     and yield each completed chunk path as it becomes ready.
 
-    A chunk is considered complete once the *next* numbered chunk file appears
-    on disk, or when ffmpeg exits (for the final chunk).
-
-    Cleans up the ffmpeg process on generator close/exception.
+    Args:
+        check_alive: optional callable returning True if stream is still alive.
+                     Checked during the wait loop; if it returns False the generator
+                     stops immediately, which unblocks the caller.
     """
     os.makedirs(output_dir, exist_ok=True)
     pattern = os.path.join(output_dir, "chunk_%05d.wav")
@@ -248,6 +249,10 @@ def stream_audio_chunks(
                         pass
                     if os.path.exists(current_path):
                         yield current_path
+                    return
+                if check_alive and not check_alive():
+                    print("[monitor] check_alive returned False, stopping chunk stream")
+                    proc.terminate()
                     return
                 wait_ticks += 1
                 if wait_ticks % 5 == 0:  # every 10s
@@ -376,11 +381,10 @@ def confirm_with_llm(
 
 def is_stream_ended(session: requests.Session, course_id: str, live_sub_id: str) -> bool:
     """
-    Return True if the monitored sub_id has ended.
+    Return True if the monitored sub_id is no longer live.
 
-    Only checks the specific sub_id that was live when monitoring started,
-    so other already-finished items in the same course don't cause false exits.
-    Status values: '1' = live, '2' = playback ready, '3' = playback generating.
+    Only checks the specific sub_id that was live when monitoring started.
+    Status '1' = live; anything else means the stream has ended.
     """
     try:
         resp = session.get(CATALOGUE_API, params={"course_id": course_id})
@@ -398,18 +402,14 @@ def is_stream_ended(session: requests.Session, course_id: str, live_sub_id: str)
             continue
         status = str(item.get("status", ""))
         title = item.get("title", "")
-        if status == "3":
-            print(f"[monitor] Item '{title}' status=3 (回放生成中)")
+        if status != "1":
+            print(f"[monitor] Item '{title}' status={status} (no longer live)")
             return True
-        if status == "2":
-            print(f"[monitor] Item '{title}' status=2 (回放已就绪)")
-            return True
-        for field in ("title", "description", "status_text"):
-            if "回放" in str(item.get(field, "")):
-                print(f"[monitor] Item '{title}' contains '回放' in {field!r}")
-                return True
+        return False
 
-    return False
+    # sub_id not found in catalogue at all — stream definitely ended
+    print(f"[monitor] sub_id={live_sub_id} no longer in catalogue")
+    return True
 
 
 
@@ -584,7 +584,20 @@ def monitor_loop(
 
         print(f"[monitor] Processing stream chunks...")
         try:
-            for chunk_path in stream_audio_chunks(live_url, chunks_dir, chunk_seconds):
+            alive_cache = {"result": True, "last_check": 0.0}
+
+            def check_alive() -> bool:
+                now = time.time()
+                if now - alive_cache["last_check"] < 60:
+                    return alive_cache["result"]
+                alive_cache["last_check"] = now
+                try:
+                    alive_cache["result"] = not is_stream_ended(session, course_id, live_sub_id)
+                except (TokenExpiredError, Exception):
+                    alive_cache["result"] = True  # can't check, keep going
+                return alive_cache["result"]
+
+            for chunk_path in stream_audio_chunks(live_url, chunks_dir, chunk_seconds, check_alive):
                 try:
                     segments = transcribe_with_model(model, chunk_path, language="zh")
                     full_text = " ".join(seg.text for seg in segments)
