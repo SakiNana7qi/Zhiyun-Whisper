@@ -317,6 +317,12 @@ def monitor(
     if priority_list:
         click.echo(f"Course priority: {priority_list}")
 
+    # Load banned course list from .env
+    ban_raw = os.getenv("BAN_COURSE_ID", "").strip().strip('"')
+    ban_list = [c.strip() for c in ban_raw.split(",") if c.strip()]
+    if ban_list:
+        click.echo(f"Banned courses: {ban_list}")
+
     session = _get_session()
 
     token = os.getenv("ZJU_TOKEN", "").strip().strip('"')
@@ -375,7 +381,23 @@ def monitor(
                 import time
 
                 time.sleep(poll_interval)
-            elif len(live_courses) == 1:
+                continue
+
+            # Filter out banned courses
+            if ban_list:
+                before = len(live_courses)
+                live_courses = [c for c in live_courses if c["course_id"] not in ban_list]
+                if len(live_courses) < before:
+                    click.echo(f"  Filtered out {before - len(live_courses)} banned course(s)")
+
+            if not live_courses:
+                click.echo(f"All live courses are banned, retrying in {poll_interval}s...")
+                import time
+
+                time.sleep(poll_interval)
+                continue
+
+            if len(live_courses) == 1:
                 course_id = live_courses[0]["course_id"]
                 course_title = live_courses[0]["title"]
                 click.echo(f"Auto-selected: {course_title} (course_id={course_id})")

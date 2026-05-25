@@ -55,6 +55,9 @@ LLM_MODEL="gpt-4o-mini"
 
 # 直播监控 - 多课程优先级（逗号分隔的 course_id，靠前的优先）
 MONITOR_PRIORITY="81771,83640"   # 多课程同时直播时自动选择优先级最高的
+
+# 直播监控 - 排除不想监控的课程
+BAN_COURSE_ID=""                 # 逗号分隔的 course_id，自动选择时会跳过这些课程
 ```
 
 ### 获取 ZJU_TOKEN（直播监控必需）
