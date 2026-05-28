@@ -11,6 +11,7 @@
 - **实时直播监控** — 检测「小测、点到、考勤」等关键词，通过钉钉机器人推送提醒
 - **自动检测当前直播** — 无需手动指定课程 ID，从课表自动发现正在直播的课程
 - **持久转录日志** — 每次直播的全文转录按课程+日期写入 `logs/` 目录永久保存
+- **课程总结** — 基于转录日志/转录文本让 LLM 提炼课程重点，只保留原文证据，不编造内容
 - **Token 自动刷新** — 设置 `ZJU_USERNAME`/`ZJU_PASSWORD` 后，监控进程检测到 Token 过期时自动重新登录，无需人工干预
 
 ## 前置条件
@@ -79,10 +80,16 @@ BAN_COURSE_ID=""                 # 逗号分隔的 course_id，自动选择时�
 
 > 技术细节见 [docs/zju-cas-auth.md](docs/zju-cas-auth.md)。
 
-### HuggingFace 镜像（国内用户必配）
+### HuggingFace 镜像（国内用户建议配置）
 
-首次运行本地模式时需要从 HuggingFace 下载 Whisper 模型，国内无法直连。
-需要设置环境变量使用镜像：
+首次运行本地模式时需要从 HuggingFace 下载 Whisper 模型，国内网络直连可能较慢或失败。
+可以通过设置环境变量切到镜像站：
+
+**macOS / Linux (zsh/bash):**
+```bash
+export HF_ENDPOINT="https://hf-mirror.com"
+# 然后在同一终端运行 python main.py ...
+```
 
 **Windows (PowerShell):**
 ```powershell
@@ -90,7 +97,13 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 # 然后在同一终端运行 python main.py ...
 ```
 
-**永久生效（推荐）：** 在系统环境变量中添加 `HF_ENDPOINT`，值为 `https://hf-mirror.com`。
+**Windows (cmd):**
+```bat
+set HF_ENDPOINT=https://hf-mirror.com
+rem 然后在同一终端运行 python main.py ...
+```
+
+**永久生效（推荐）：** 把 `HF_ENDPOINT` 设为 `https://hf-mirror.com`，写进系统环境变量或 shell 配置文件即可。
 
 ## 使用
 
@@ -111,7 +124,18 @@ python main.py transcribe "URL" --batch-size 32
 
 # 列出某门课所有课次
 python main.py list --course-id 81771
+
+# 基于转录日志生成课程总结（LLM 提炼重点，保留原文证据）
+python main.py summarize --log-file logs/81771_2026-05-28.txt
+
+# 或者按课程 ID + 日期自动定位日志
+python main.py summarize --course-id 81771 --date 2026-05-28
+
+# 直接把总结发到钉钉机器人
+python main.py summarize --course-id 81771 --date 2026-05-28 --send-to-dingtalk
 ```
+
+`summarize` 会复用 `.env` 里的 `LLM_API_BASE`、`LLM_API_KEY`、`LLM_MODEL`，把转录中最有信息量的原文先筛出来，再交给 LLM 生成“这节课讲了什么、重要内容是什么”的总结。
 
 ### 直播监控
 

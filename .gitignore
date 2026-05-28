@@ -3,3 +3,4 @@ output/
 src/__pycache__/
 chunks/
 logs/
+.vscode/
