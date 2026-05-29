@@ -208,6 +208,169 @@ def list_lessons(course_id: str):
 
 @cli.command()
 @click.option(
+    "--log-file",
+    "-f",
+    default=None,
+    help="Path to a transcript log or exported .txt transcript",
+)
+@click.option(
+    "--course-id",
+    "-c",
+    default=None,
+    help="Course ID used to resolve logs/{course_id}_{date}.txt when --log-file is omitted",
+)
+@click.option(
+    "--date",
+    "-d",
+    default=None,
+    help="Date for the default log filename, in YYYY-MM-DD format",
+)
+@click.option(
+    "--log-dir",
+    default="logs",
+    show_default=True,
+    help="Directory containing live-monitor logs",
+)
+@click.option(
+    "--output-file",
+    "-o",
+    default=None,
+    help="Optional markdown file to save the summary",
+)
+@click.option(
+    "--max-highlights",
+    default=5,
+    type=int,
+    show_default=True,
+    help="Maximum number of candidate evidence lines to send to the LLM",
+)
+@click.option(
+    "--send-to-dingtalk",
+    is_flag=True,
+    default=False,
+    help="Send the rendered summary to DingTalk",
+)
+@click.option(
+    "--dingtalk-webhook",
+    default=None,
+    help="DingTalk robot webhook URL (falls back to DINGTALK_WEBHOOK)",
+)
+@click.option(
+    "--dingtalk-secret",
+    default=None,
+    help="DingTalk robot signing secret (falls back to DINGTALK_SECRET)",
+)
+@click.option(
+    "--dingtalk-at-mobile",
+    default=None,
+    help="Mobile number to @mention in DingTalk (falls back to DINGTALK_AT_MOBILE)",
+)
+@click.option(
+    "--llm-api-base",
+    default=None,
+    help="OpenAI-compatible API base URL (falls back to LLM_API_BASE)",
+)
+@click.option(
+    "--llm-api-key",
+    default=None,
+    help="OpenAI-compatible API key (falls back to LLM_API_KEY)",
+)
+@click.option(
+    "--llm-model",
+    default=None,
+    help="Model name for summarization (falls back to LLM_MODEL)",
+)
+def summarize(
+    log_file: str | None,
+    course_id: str | None,
+    date: str | None,
+    log_dir: str,
+    output_file: str | None,
+    max_highlights: int,
+    send_to_dingtalk: bool,
+    dingtalk_webhook: str | None,
+    dingtalk_secret: str | None,
+    dingtalk_at_mobile: str | None,
+    llm_api_base: str | None,
+    llm_api_key: str | None,
+    llm_model: str | None,
+):
+    """Create an evidence-based summary from a transcript log."""
+    from src.summarizer import resolve_log_path, summarize_file, write_summary
+    from src.notifier import send_dingtalk
+
+    api_base = (llm_api_base or os.getenv("LLM_API_BASE", "")).strip().strip('"')
+    api_key = (llm_api_key or os.getenv("LLM_API_KEY", "")).strip().strip('"')
+    model = (llm_model or os.getenv("LLM_MODEL", "gpt-4o-mini")).strip().strip('"')
+
+    if not api_base or not api_key:
+        click.echo(
+            "Error: LLM_API_BASE and LLM_API_KEY must be set in .env or provided via command line.",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not log_file:
+        if not course_id:
+            click.echo(
+                "Error: provide either --log-file or --course-id so I can locate the transcript.",
+                err=True,
+            )
+            sys.exit(1)
+        log_file = resolve_log_path(course_id, log_dir=log_dir, date_str=date)
+
+    if not os.path.exists(log_file):
+        click.echo(f"Error: transcript file not found: {log_file}", err=True)
+        sys.exit(1)
+
+    summary, rendered = summarize_file(
+        log_file,
+        api_base=api_base,
+        api_key=api_key,
+        model=model,
+        max_candidates=max_highlights,
+    )
+
+    if summary.line_count == 0:
+        click.echo(
+            f"Error: no usable transcript lines were found in {log_file}",
+            err=True,
+        )
+        sys.exit(1)
+
+    click.echo(rendered, nl=False)
+
+    if output_file:
+        write_summary(output_file, rendered)
+        click.echo(f"Saved summary to {output_file}")
+
+    if send_to_dingtalk:
+        webhook = (dingtalk_webhook or os.getenv("DINGTALK_WEBHOOK", "")).strip().strip('"')
+        secret = (dingtalk_secret or os.getenv("DINGTALK_SECRET", "")).strip().strip('"')
+        at_mobile = (dingtalk_at_mobile or os.getenv("DINGTALK_AT_MOBILE", "")).strip().strip('"')
+
+        if not webhook or not secret:
+            click.echo(
+                "Error: DingTalk webhook and secret are required when --send-to-dingtalk is used.",
+                err=True,
+            )
+            sys.exit(1)
+
+        at_mobiles = [at_mobile] if at_mobile else []
+        ok = send_dingtalk(
+            webhook=webhook,
+            secret=secret,
+            message=rendered,
+            at_mobiles=at_mobiles,
+        )
+        if not ok:
+            click.echo("Error: failed to send summary to DingTalk", err=True)
+            sys.exit(1)
+        click.echo("Sent summary to DingTalk")
+
+
+@cli.command()
+@click.option(
     "--course-id",
     "-c",
     default=None,
