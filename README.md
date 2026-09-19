@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 获取智云课堂课程录播视频
+- 获取智云课堂旧版和新版（interactivemeta）课程录播视频
 - 支持本地 faster-whisper 和 OpenAI Whisper API 两种转录模式
 - 输出 `.txt`（纯文本）和 `.srt`（带时间戳字幕）格式
 - 大文件下载自动断点续传
@@ -100,6 +100,9 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 # 转录指定课次（本地 Whisper，默认 large-v3 模型）
 python main.py transcribe "https://classroom.zju.edu.cn/livingroom?course_id=81771&sub_id=1892675&tenant_code=112"
 
+# 转录新版智云课次（直接使用浏览器中的回放链接）
+python main.py transcribe "https://interactivemeta.cmc.zju.edu.cn/#/replay?course_id=86830&sub_id=1967175&tenant_code=112"
+
 # 使用 OpenAI API 转录
 python main.py transcribe "URL" --mode api
 
@@ -112,6 +115,9 @@ python main.py transcribe "URL" --batch-size 32
 # 列出某门课所有课次
 python main.py list --course-id 81771
 ```
+
+旧版和新版回放共用转录流程，均支持 `--mode`、`--model` 和 `--batch-size`。
+新版回放地址为数组时，优先使用 `playback.selected` 指定的视频；未指定或不可用时使用第一个有效地址。
 
 ### 直播监控
 
@@ -214,4 +220,4 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 - **Token 自动刷新** — 设置 `ZJU_USERNAME`/`ZJU_PASSWORD` 后，Token 过期时 monitor 自动重新登录（最多重试 3 次）；若未设置账号密码，过期后进程退出
 - **钉钉加签** — Webhook 必须启用「加签」安全设置，`DINGTALK_SECRET` 为签名密钥（以 `SEC` 开头）
 - **LLM 调用次数** — 每次关键词命中调用一次确认（is/否），确认后再调用一次语境分析；使用 gpt-4o-mini 成本极低
-- **仅支持东区教学楼** — 北区教学楼（`ilive` 类型，如紫金港北楼）使用 WebRTC 互动直播系统，暂不支持
+- **直播监控暂仅支持旧版** — 新版（`ilive` 类型，如紫金港北楼）的录播已支持转录，WebRTC 互动直播监控暂不支持

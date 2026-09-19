@@ -29,14 +29,18 @@ class Lesson:
 
 def parse_url(url: str) -> dict[str, str]:
     """
-    Extract course_id, sub_id, tenant_code from a livingroom or coursedetail URL.
+    Extract course_id, sub_id, tenant_code from legacy or new replay URLs.
 
     Supports:
       - https://classroom.zju.edu.cn/livingroom?course_id=81771&sub_id=1892675&tenant_code=112
       - https://classroom.zju.edu.cn/coursedetail?course_id=81771&tenant_code=112
+      - https://interactivemeta.cmc.zju.edu.cn/#/replay?course_id=86830&sub_id=1967175&tenant_code=112
     """
     parsed = urlparse(url)
     params = parse_qs(parsed.query)
+    # The new classroom puts its route and query after '#'. Route parameters
+    # take precedence if the outer URL also contains query parameters.
+    params.update(parse_qs(urlparse(parsed.fragment).query))
 
     result = {}
     if "course_id" in params:
@@ -50,6 +54,31 @@ def parse_url(url: str) -> dict[str, str]:
         raise ValueError(f"Cannot extract course_id from URL: {url}")
 
     return result
+
+
+def _extract_video_url(content: dict) -> str | None:
+    """Normalize legacy string URLs and new classroom playback URL lists."""
+    playback = content.get("playback")
+    if isinstance(playback, dict):
+        urls = playback.get("url")
+        if isinstance(urls, str) and urls.strip():
+            return urls.strip()
+        if isinstance(urls, list):
+            try:
+                selected = int(playback.get("selected", 0))
+            except (TypeError, ValueError):
+                selected = 0
+            if 0 <= selected < len(urls):
+                url = urls[selected]
+                if isinstance(url, str) and url.strip():
+                    return url.strip()
+            # Missing/invalid selections should still allow an available replay.
+            for url in urls:
+                if isinstance(url, str) and url.strip():
+                    return url.strip()
+
+    url = content.get("url")
+    return url.strip() if isinstance(url, str) and url.strip() else None
 
 
 def fetch_lessons(session: requests.Session, course_id: str) -> list[Lesson]:
@@ -77,10 +106,8 @@ def fetch_lessons(session: requests.Session, course_id: str) -> list[Lesson]:
         if content_str:
             try:
                 content = json.loads(content_str)
-                if content.get("playback", {}).get("url"):
-                    video_url = content["playback"]["url"]
-                elif content.get("url"):
-                    video_url = content["url"]
+                if isinstance(content, dict):
+                    video_url = _extract_video_url(content)
             except (json.JSONDecodeError, TypeError):
                 pass
 
