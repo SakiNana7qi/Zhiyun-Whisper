@@ -316,6 +316,24 @@ def check_keywords_pinyin(
 # ---------------------------------------------------------------------------
 
 
+def _extract_llm_answer(content: str | None) -> str:
+    """Extract final text when a provider leaks thinking markers into content.
+
+    Some providers omit the opening <think> tag, e.g. '否</think>否'.
+    Only text after the last closing tag is a final answer. A separate
+    reasoning_content field must never be used as a fallback answer.
+    """
+    if not isinstance(content, str):
+        raise ValueError("LLM returned no final answer")
+
+    answer = content.rsplit("</think>", 1)[-1].strip()
+    if "<think>" in answer:
+        raise ValueError("LLM returned an unfinished thinking block")
+    if not answer:
+        raise ValueError("LLM returned no final answer")
+    return answer
+
+
 def confirm_with_llm(
     text: str,
     api_base: str,
@@ -363,7 +381,7 @@ def confirm_with_llm(
             temperature=0,
             timeout=15,
         )
-        answer = resp.choices[0].message.content.strip()
+        answer = _extract_llm_answer(resp.choices[0].message.content)
         if debug:
             print(f"[debug] LLM response: {answer}")
         return answer.startswith("是")
@@ -476,7 +494,7 @@ def analyze_context_with_llm(
             temperature=0,
             timeout=15,
         )
-        answer = resp.choices[0].message.content.strip()
+        answer = _extract_llm_answer(resp.choices[0].message.content)
         if debug:
             print(f"[debug] LLM analysis: {answer}")
         return answer
