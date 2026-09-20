@@ -19,6 +19,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Generator
+from urllib.parse import urlsplit
 
 import requests
 
@@ -27,6 +28,9 @@ from src.session_utils import mount_legacy_ssl
 
 GET_SUB_INFO_API = (
     "https://classroom.zju.edu.cn/courseapi/v3/portal-home-setting/get-sub-info"
+)
+INTERACTIVE_STREAMS_API = (
+    "https://interactivemeta.cmc.zju.edu.cn/courseapi/index.php/v2/meta/getscreenstream"
 )
 SCHEDULE_API = (
     "https://yjapi.cmc.zju.edu.cn/courseapi/v2/schedule/get-week-schedules"
@@ -116,13 +120,75 @@ def fetch_live_courses(token: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _fetch_interactive_live_url(session: requests.Session, sub_id: str) -> str | None:
+    """Get the signed teacher HLS URL used by the new classroom's player API.
+
+    The ilive get-sub-info response may say is_m3u8=no even when this separate
+    endpoint provides stream_m3u8. Do not use its internal RTMP push addresses
+    or hand-convert stream_play (WebRTC) URLs.
+    """
+    try:
+        mount_legacy_ssl(session)
+        resp = session.get(
+            INTERACTIVE_STREAMS_API,
+            params={"sub_id": sub_id, "clear_cache": 1},
+            timeout=10,
+        )
+        if resp.status_code == 401:
+            raise TokenExpiredError("Interactive stream API authentication expired")
+        resp.raise_for_status()
+        payload = resp.json()
+    except TokenExpiredError:
+        raise
+    except Exception as exc:
+        logger.error("Interactive stream API request failed (sub_id=%s): %s", sub_id, exc)
+        return None
+
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        logger.error("Invalid interactive stream response (sub_id=%s)", sub_id)
+        return None
+    # This API reports expired credentials as HTTP 200 with result.status=401.
+    if str(result.get("status")) == "401" or result.get("name") == "Unauthorized":
+        raise TokenExpiredError("Interactive stream API authentication expired")
+    if not payload.get("success") or str(result.get("err", 0)) != "0":
+        logger.error("Interactive stream API could not provide streams (sub_id=%s)", sub_id)
+        return None
+
+    streams = result.get("data")
+    if isinstance(streams, dict):
+        streams = list(streams.values())
+    if isinstance(streams, list):
+        for stream in streams:
+            # type=3 is the teacher; type=2 is PPT and may contain no audio.
+            # voice_track/video_track can both be '0' for an active physical
+            # classroom stream, so they are not availability indicators.
+            if not isinstance(stream, dict) or str(stream.get("type")) != "3":
+                continue
+            url = stream.get("stream_m3u8")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            url = url.strip()
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                continue
+            if parsed.scheme in ("https", "http") and parsed.netloc:
+                print(f"[monitor] Interactive teacher HLS stream found (sub_id={sub_id})")
+                return url
+
+    logger.warning("No teacher HLS stream available for ilive yet (sub_id=%s)", sub_id)
+    return None
+
+
 def fetch_live_url(session: requests.Session, course_id: str) -> tuple[str, str] | None:
     """
     Return (m3u8_url, live_sub_id) for the currently live session, or None.
 
-    Two-step process:
+    Discovery process:
     1. Catalogue API  → find the item with status='1' (live), get its sub_id
-    2. get-sub-info API → extract data.live_url.output.m3u8
+    2. get-sub-info API → use data.live_url.output.m3u8 for legacy classrooms
+    3. For ilive, getscreenstream API → use the teacher's signed stream_m3u8
     """
     # Step 1: find live sub_id
     try:
@@ -137,9 +203,11 @@ def fetch_live_url(session: requests.Session, course_id: str) -> tuple[str, str]
         return None
 
     live_sub_id = None
+    live_type = None
     for item in data["result"]["data"]:
         if str(item.get("status", "")) == "1":
             live_sub_id = str(item.get("sub_id", item.get("id", "")))
+            live_type = item.get("type")
             print(
                 f"[monitor] Live item found: sub_id={live_sub_id} title={item.get('title')!r}"
             )
@@ -171,7 +239,14 @@ def fetch_live_url(session: requests.Session, course_id: str) -> tuple[str, str]
     except (KeyError, TypeError):
         pass
 
-    logger.error("live_url.output.m3u8 not found in get-sub-info response: %s", info)
+    detail = info.get("data")
+    if not isinstance(detail, dict):
+        detail = {}
+    if "ilive" in (live_type, detail.get("sub_type"), detail.get("sub_data_type")):
+        url = _fetch_interactive_live_url(session, live_sub_id)
+        return (url, live_sub_id) if url else None
+
+    logger.warning("No legacy live HLS URL available (course_id=%s, sub_id=%s)", course_id, live_sub_id)
     return None
 
 
