@@ -2,7 +2,7 @@
 Live stream monitoring for Zhiyun Classroom.
 
 Polls the catalogue API for a live HLS stream, segments it into 30-second
-WAV chunks, transcribes each chunk with faster-whisper, performs pinyin-based
+WAV chunks, transcribes each chunk with Qwen3-ASR or Whisper, performs pinyin-based
 fuzzy keyword matching, and sends DingTalk alerts when keywords are confirmed
 by an LLM.
 """
@@ -522,12 +522,13 @@ def monitor_loop(
     course_title: str = "",
     debug: bool = False,
     credentials: tuple[str, str] | None = None,
+    batch_size: int | None = None,
 ) -> None:
     """
     Full monitoring pipeline:
 
     1. Poll catalogue API until a live HLS URL is found.
-    2. Load the Whisper model once.
+    2. Load the selected ASR model once.
     3. For each 30-second audio chunk:
        a. Transcribe with the pre-loaded model.
        b. Run pinyin fuzzy keyword match.
@@ -535,8 +536,7 @@ def monitor_loop(
        d. On confirmation, send DingTalk notification.
        e. Delete the chunk to save disk space.
     """
-    from faster_whisper import WhisperModel
-    from src.transcriber import transcribe_with_model
+    from src.transcriber import load_local_model
     from src.notifier import send_dingtalk
 
     # --- Phase 1: wait for live stream ---
@@ -565,16 +565,9 @@ def monitor_loop(
     print(f"[monitor] Live stream detected: {live_url} (sub_id={live_sub_id})")
 
     # --- Phase 2: load model once ---
-    try:
-        import torch
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    except ImportError:
-        device = "cpu"
-
-    compute_type = "float16" if device == "cuda" else "int8"
-    print(f"[monitor] Loading Whisper model: {model_size} (device={device})")
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    transcriber = load_local_model(
+        model_size=model_size, batch_size=batch_size, return_timestamps=False,
+    )
     print("[monitor] Model ready. Starting chunk processing...")
 
     # --- Phase 3: process chunks ---
@@ -621,7 +614,7 @@ def monitor_loop(
 
             for chunk_path in stream_audio_chunks(live_url, chunks_dir, chunk_seconds, check_alive):
                 try:
-                    segments = transcribe_with_model(model, chunk_path, language="zh")
+                    segments = transcriber.transcribe(chunk_path, language="zh")
                     full_text = " ".join(seg.text for seg in segments)
 
                     # Periodic end-of-stream check every 60s regardless of content

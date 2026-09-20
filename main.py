@@ -11,6 +11,7 @@ import sys
 
 import click
 from dotenv import load_dotenv
+from src.transcriber import DEFAULT_MODEL
 
 load_dotenv()
 
@@ -63,12 +64,13 @@ def cli():
     "-m",
     type=click.Choice(["local", "api"]),
     default="local",
-    help="Transcription backend: local (faster-whisper) or api (OpenAI)",
+    help="Transcription mode: local (Qwen3-ASR or Whisper) or api (OpenAI Whisper)",
 )
 @click.option(
     "--model",
-    default="large-v3",
-    help="Whisper model size for local mode (tiny/base/small/medium/large-v3)",
+    default=DEFAULT_MODEL,
+    show_default=True,
+    help="Local model: qwen3-asr-1.7b/0.6b (or 1.7b/0.6b), or Whisper tiny/base/small/medium/large-v3",
 )
 @click.option(
     "--language",
@@ -84,13 +86,12 @@ def cli():
 )
 @click.option(
     "--batch-size",
-    default=16,
-    type=int,
-    show_default=True,
-    help="Batch size for local Whisper inference (higher = faster on GPU, more VRAM)",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Local inference batch size (default: Qwen3-ASR 1, Whisper 16)",
 )
 def transcribe(
-    url: str, mode: str, model: str, language: str, output_dir: str, batch_size: int
+    url: str, mode: str, model: str, language: str, output_dir: str, batch_size: int | None
 ):
     """Transcribe a Zhiyun Classroom lesson from URL."""
     from src.crawler import parse_url, fetch_lessons, download_audio
@@ -229,9 +230,15 @@ def list_lessons(course_id: str):
 )
 @click.option(
     "--model",
-    default="small",
+    default=DEFAULT_MODEL,
     show_default=True,
-    help="Whisper model size (tiny/base/small/medium/large-v3)",
+    help="Local model: qwen3-asr-1.7b/0.6b (or 1.7b/0.6b), or Whisper tiny/base/small/medium/large-v3",
+)
+@click.option(
+    "--batch-size",
+    default=None,
+    type=click.IntRange(min=1),
+    help="Local inference batch size (default: Qwen3-ASR 1, Whisper 16)",
 )
 @click.option(
     "--poll-interval",
@@ -267,6 +274,7 @@ def monitor(
     chunks_dir,
     log_dir,
     debug,
+    batch_size,
 ):
     """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
     from src.live_monitor import monitor_loop, fetch_live_courses, TokenExpiredError
@@ -444,6 +452,7 @@ def monitor(
         log_dir=log_dir,
         debug=debug,
         credentials=credentials,
+        batch_size=batch_size,
     )
 
 

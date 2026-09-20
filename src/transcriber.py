@@ -1,17 +1,24 @@
 """
 Speech-to-text transcription module.
 
-Supports two backends:
-- local: faster-whisper (CTranslate2, GPU/CPU)
+Supports two modes:
+- local: Qwen3-ASR (default) or faster-whisper, on GPU/CPU
 - api:   OpenAI Whisper API
 """
 
 from __future__ import annotations
 
-import io
 import math
 import os
 from dataclasses import dataclass
+
+
+DEFAULT_MODEL = "qwen3-asr-1.7b"
+QWEN_MODELS = {
+    alias: f"Qwen/Qwen3-ASR-{size}"
+    for size in ("0.6B", "1.7B")
+    for alias in (size.lower(), f"qwen3-asr-{size.lower()}", f"qwen/qwen3-asr-{size.lower()}")
+}
 
 
 @dataclass
@@ -91,25 +98,35 @@ def transcribe_with_model(
     return segments
 
 
-def transcribe_local(
-    audio_path: str,
-    model_size: str = "large-v3",
+@dataclass
+class WhisperTranscriber:
+    model: object
+    batch_size: int
+
+    def transcribe(self, audio_path: str, language: str = "zh") -> list[Segment]:
+        return transcribe_with_model(self.model, audio_path, language, self.batch_size)
+
+
+def load_local_model(
+    model_size: str = DEFAULT_MODEL,
     device: str = "auto",
-    language: str = "zh",
-    batch_size: int = 16,
-) -> list[Segment]:
-    """
-    Transcribe audio using faster-whisper (local model).
+    batch_size: int | None = None,
+    return_timestamps: bool = True,
+):
+    """Load a reusable local transcriber; Qwen defaults to batch 1, Whisper to 16."""
+    if batch_size is not None and batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    qwen_model = QWEN_MODELS.get(model_size.lower())
+    if qwen_model:
+        from src.qwen_asr_backend import QwenTranscriber
 
-    Args:
-        audio_path: Path to audio file (WAV recommended)
-        model_size: Whisper model size (tiny/base/small/medium/large-v3)
-        device: "auto", "cuda", or "cpu"
-        language: Language code for transcription
+        return QwenTranscriber(
+            qwen_model, device=device, batch_size=batch_size or 1,
+            return_timestamps=return_timestamps,
+        )
+    if "qwen3-asr" in model_size.lower():
+        raise ValueError("Supported Qwen3-ASR sizes: 0.6b and 1.7b")
 
-    Returns:
-        List of Segment objects with timestamps and text
-    """
     from faster_whisper import WhisperModel
 
     if device == "auto":
@@ -125,7 +142,19 @@ def transcribe_local(
     print(f"  Loading model: {model_size} (device={device}, compute={compute_type})")
     model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-    return transcribe_with_model(model, audio_path, language, batch_size)
+    return WhisperTranscriber(model, batch_size or 16)
+
+
+def transcribe_local(
+    audio_path: str,
+    model_size: str = DEFAULT_MODEL,
+    device: str = "auto",
+    language: str = "zh",
+    batch_size: int | None = None,
+) -> list[Segment]:
+    """Transcribe a recording with Qwen3-ASR or Whisper, including SRT timestamps."""
+    transcriber = load_local_model(model_size, device, batch_size, return_timestamps=True)
+    return transcriber.transcribe(audio_path, language)
 
 
 # OpenAI Whisper API has a 25 MB file size limit

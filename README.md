@@ -1,11 +1,11 @@
 # Zhiyun-Whisper
 
-浙江大学智云课堂语音转录工具 — 自动下载课程录播并使用 Whisper 进行语音转文字，支持实时直播监控与关键词提醒。
+浙江大学智云课堂语音转录工具 — 自动下载课程录播并使用 Qwen3-ASR 或 Whisper 进行语音转文字，支持实时直播监控与关键词提醒。
 
 ## 功能
 
 - 获取智云课堂旧版和新版（interactivemeta）课程录播视频
-- 支持本地 faster-whisper 和 OpenAI Whisper API 两种转录模式
+- 默认使用本地 **Qwen3-ASR-1.7B**，支持切换 0.6B、faster-whisper 和 OpenAI Whisper API
 - 输出 `.txt`（纯文本）和 `.srt`（带时间戳字幕）格式
 - 大文件下载自动断点续传
 - **实时直播监控** — 检测「小测、点到、考勤」等关键词，通过钉钉机器人推送提醒
@@ -23,13 +23,16 @@
    # Windows (choco)
    choco install ffmpeg
    ```
-3. **CUDA**（可选）— 本地 Whisper 模式使用 GPU 加速，CPU 也可运行但较慢
+3. **CUDA**（可选）— 本地 Qwen3-ASR / Whisper 使用 GPU 加速，CPU 也可运行但较慢
 
 ## 安装
 
 ```bash
 pip install -r requirements.txt
 ```
+
+升级已有安装时也需执行此命令，以安装新增的 `qwen-asr` 依赖。建议使用独立的 Python 3.11/3.12 环境。
+Qwen3-ASR 使用官方 `qwen-asr` 包的 Transformers 后端，无需安装 vLLM 或 FlashAttention。
 
 ## 配置
 
@@ -81,8 +84,8 @@ BAN_COURSE_ID=""                 # 逗号分隔的 course_id，自动选择时�
 
 ### HuggingFace 镜像（国内用户必配）
 
-首次运行本地模式时需要从 HuggingFace 下载 Whisper 模型，国内无法直连。
-需要设置环境变量使用镜像：
+首次运行本地模式时需要从 HuggingFace 下载所选的 Qwen3-ASR 或 Whisper 模型。
+无法直连时，可设置环境变量使用镜像：
 
 **Windows (PowerShell):**
 ```powershell
@@ -92,12 +95,17 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 
 **永久生效（推荐）：** 在系统环境变量中添加 `HF_ENDPOINT`，值为 `https://hf-mirror.com`。
 
+**Linux / WSL (Bash):**
+```bash
+export HF_ENDPOINT="https://hf-mirror.com"
+```
+
 ## 使用
 
 ### 录播转录
 
 ```bash
-# 转录指定课次（本地 Whisper，默认 large-v3 模型）
+# 转录指定课次（默认使用本地 Qwen3-ASR-1.7B）
 python main.py transcribe "https://classroom.zju.edu.cn/livingroom?course_id=81771&sub_id=1892675&tenant_code=112"
 
 # 转录新版智云课次（直接使用浏览器中的回放链接）
@@ -106,11 +114,14 @@ python main.py transcribe "https://interactivemeta.cmc.zju.edu.cn/#/replay?cours
 # 使用 OpenAI API 转录
 python main.py transcribe "URL" --mode api
 
-# 指定模型大小（tiny/base/small/medium/large-v3）
+# 使用较小的 Qwen3-ASR-0.6B
+python main.py transcribe "URL" --model 0.6b
+
+# 切回本地 Whisper（tiny/base/small/medium/large-v3 等名称保持兼容）
 python main.py transcribe "URL" --mode local --model medium
 
-# 调整批处理大小（GPU 显存充足时可调高以加速，默认 16）
-python main.py transcribe "URL" --batch-size 32
+# 调整批处理大小（默认 Qwen 为 1、Whisper 为 16，增大需要更多显存）
+python main.py transcribe "URL" --batch-size 2
 
 # 列出某门课所有课次
 python main.py list --course-id 81771
@@ -119,6 +130,14 @@ python main.py list --course-id 81771
 旧版和新版回放共用转录流程，均支持 `--mode`、`--model` 和 `--batch-size`。
 新版回放地址为数组时，优先使用 `playback.selected` 指定的视频；未指定或不可用时使用第一个有效地址。
 
+Qwen 模型参数支持 `1.7b` / `0.6b`、`qwen3-asr-1.7b` / `qwen3-asr-0.6b`，
+也支持完整名称 `Qwen/Qwen3-ASR-1.7B` / `Qwen/Qwen3-ASR-0.6B`，大小写不敏感。
+`--mode api` 仍使用 OpenAI Whisper API，`--model` 仅控制本地模式。
+
+Qwen 录播转录会额外加载 `Qwen/Qwen3-ForcedAligner-0.6B` 来生成字幕时间戳，首次使用时也需下载该模型。
+长音频由官方 SDK 自动切分并合并时间戳；字词时间戳会合并为字幕片段，保留原转录的标点。
+ASR 支持 30 种语言；时间戳对齐支持中文、英文、粤语、法语、德语、意大利语、日语、韩语、葡萄牙语、俄语、西班牙语，参见[官方说明](https://github.com/QwenLM/Qwen3-ASR)。
+
 ### 直播监控
 
 实时监控智云直播，检测关键词（拼音模糊匹配 + LLM 语义确认），通过钉钉推送提醒。
@@ -126,6 +145,12 @@ python main.py list --course-id 81771
 ```bash
 # 不指定课程 ID — 自动从课表检测正在直播的课，没有则持续轮询等待
 python main.py monitor --debug
+
+# 使用 Qwen3-ASR-0.6B
+python main.py monitor --model 0.6b --debug
+
+# 使用原来的 Whisper small
+python main.py monitor --model small --debug
 
 # 指定课程 ID
 python main.py monitor --course-id 81706
@@ -146,10 +171,8 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 |------|--------|------|
 | `--course-id` | 自动检测 | 课程 ID，省略时从课表自动发现直播 |
 | `--keywords` | `小测,点到,考勤,点名,学在浙大,quiz,雷达` | 逗号分隔的关键词 |
-| `--model` | `large-v3` | Whisper 模型大小（tiny/base/small/medium/large-v3） |
-| `--batch-size` | `16` | 本地推理批处理大小，GPU 显存充足时可调高（如 32）加速，CPU 模式设为 1 |
-| `--language` | `zh` | 转录语言代码 |
-| `--output-dir` | `output` | 输出目录 |
+| `--model` | `qwen3-asr-1.7b` | 支持 Qwen 1.7b/0.6b 或 Whisper tiny/base/small/medium/large-v3 等 |
+| `--batch-size` | Qwen: `1` / Whisper: `16` | 本地推理批处理大小，增大需要更多显存 |
 | `--chunk-duration` | `30` | 每段音频长度（秒） |
 | `--poll-interval` | `15` | 无直播时轮询间隔（秒） |
 | `--chunks-dir` | `chunks` | 临时音频切片目录（处理后删除） |
@@ -167,7 +190,7 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 **工作流程：**
 1. 若未指定 `--course-id`，从课表 API 查找 `status='1'` 的直播课，没有则每隔 `--poll-interval` 秒重试
 2. 找到直播后，获取 HLS 流 URL（m3u8），用 ffmpeg 切成 30 秒 WAV 片段
-3. 用 faster-whisper 转录每个片段，全文追加写入 `logs/{course_id}_{date}.txt`
+3. 使用所选模型（默认 Qwen3-ASR-1.7B）转录每个片段，模型只加载一次；直播不加载时间戳对齐模型，全文追加写入 `logs/{course_id}_{date}.txt`
 4. 拼音模糊匹配关键词（容忍口音识别错误，如「小策」≈「小测」）
 5. 命中后调用 LLM 二次确认（是/否），通过后再调用 LLM 分析最近 3 段转录的语境
 6. 通过钉钉 Webhook 推送告警（含课程名称、时间、LLM 分析、最近转录原文），120 秒冷却
@@ -211,12 +234,13 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 - `rapidfuzz` — 快速字符串相似度计算
 - `openai` — LLM 语义确认（兼容任意 OpenAI-compatible API）
 - `faster-whisper` — 本地 Whisper 推理（CTranslate2 后端）
+- `qwen-asr` — 本地 Qwen3-ASR 0.6B/1.7B 推理及录播时间戳对齐（Transformers 后端）
 - `requests` — HTTP 请求
 - `click` — CLI 框架
 
 ## 注意事项
 
-- **直播监控需要 GPU** — small 模型在 CPU 上转录 30s 音频约需 15-45s，可能积压；建议使用 CUDA
+- **直播监控建议使用 GPU** — CPU 推理可能导致音频切片积压；显存不足可使用 `--model 0.6b`，或切回 `--model small` 使用 Whisper
 - **Token 自动刷新** — 设置 `ZJU_USERNAME`/`ZJU_PASSWORD` 后，Token 过期时 monitor 自动重新登录（最多重试 3 次）；若未设置账号密码，过期后进程退出
 - **钉钉加签** — Webhook 必须启用「加签」安全设置，`DINGTALK_SECRET` 为签名密钥（以 `SEC` 开头）
 - **LLM 调用次数** — 每次关键词命中调用一次确认（is/否），确认后再调用一次语境分析；使用 gpt-4o-mini 成本极低
