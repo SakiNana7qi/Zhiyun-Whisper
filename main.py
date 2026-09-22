@@ -277,7 +277,7 @@ def monitor(
     batch_size,
 ):
     """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
-    from src.live_monitor import monitor_loop, fetch_live_courses, TokenExpiredError
+    from src.live_monitor import monitor_loop, fetch_live_courses, TokenExpiredError, check_llm_apis
     from src.auth import refresh_token
 
     # DingTalk config — webhook and secret are required
@@ -315,6 +315,20 @@ def monitor(
         "api_key": llm_api_key,
         "model": llm_model,
     }
+    fallback = {
+        "api_base": os.getenv("LLM_FALLBACK_API_BASE", "").strip().strip('"'),
+        "api_key": os.getenv("LLM_FALLBACK_API_KEY", "").strip().strip('"'),
+        "model": os.getenv("LLM_FALLBACK_MODEL", "").strip().strip('"'),
+    }
+    if any(fallback.values()):
+        if not all(fallback.values()):
+            raise click.ClickException(
+                "LLM_FALLBACK_API_BASE, LLM_FALLBACK_API_KEY and LLM_FALLBACK_MODEL "
+                "must all be set, or all left empty to disable fallback."
+            )
+        llm_config["fallback"] = fallback
+
+    check_llm_apis(**llm_config, debug=debug)
 
     keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
     click.echo(f"Monitoring course {course_id} for keywords: {keyword_list}")

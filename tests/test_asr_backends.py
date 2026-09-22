@@ -184,11 +184,13 @@ class AsrCommandTests(unittest.TestCase):
         auth = ModuleType("src.auth")
         auth.refresh_token = Mock()
         config = {"ZJU_TOKEN": "test", "DINGTALK_WEBHOOK": "test", "DINGTALK_SECRET": "test",
-                  "LLM_API_BASE": "test", "LLM_API_KEY": "test"}
+                  "LLM_API_BASE": "test", "LLM_API_KEY": "test",
+                  "LLM_FALLBACK_API_BASE": "", "LLM_FALLBACK_API_KEY": "", "LLM_FALLBACK_MODEL": ""}
         for args, model, batch in (([], "qwen3-asr-1.7b", None), (["--model", "0.6b", "--batch-size", "2"], "0.6b", 2),
                                    (["--model", "small"], "small", None)):
             with (
                 self.subTest(args=args), patch.dict("sys.modules", {"src.auth": auth}), patch.dict("os.environ", config),
+                patch("src.live_monitor.check_llm_apis"),
                 patch("main._get_session"), patch("src.live_monitor.monitor_loop") as monitor,
             ):
                 result = CliRunner().invoke(cli, ["monitor", "--course-id", "1", *args])
@@ -200,6 +202,75 @@ class AsrCommandTests(unittest.TestCase):
         for command in (["monitor"], ["transcribe", "https://example.invalid"]):
             result = CliRunner().invoke(cli, [*command, "--batch-size", "0"])
             self.assertEqual(result.exit_code, 2)
+
+
+class MonitorLlmConfigTests(unittest.TestCase):
+    def invoke(self, fallback_env, check_result=None):
+        auth = ModuleType("src.auth")
+        auth.refresh_token = Mock()
+        env = {
+            "ZJU_TOKEN": "test", "DINGTALK_WEBHOOK": "test", "DINGTALK_SECRET": "test",
+            "LLM_API_BASE": "https://primary.invalid/v1", "LLM_API_KEY": "primary-key", "LLM_MODEL": "primary-model",
+            **fallback_env,
+        }
+        with (
+            patch.dict("sys.modules", {"src.auth": auth}), patch.dict("os.environ", env, clear=True),
+            patch("src.live_monitor.check_llm_apis", return_value=check_result or {"primary": True}) as check,
+            patch("main._get_session") as session, patch("src.live_monitor.monitor_loop") as monitor,
+        ):
+            def checked_before_startup(**kwargs):
+                session.assert_not_called()
+                monitor.assert_not_called()
+                return check_result or {"primary": True}
+
+            check.side_effect = checked_before_startup
+            result = CliRunner().invoke(cli, ["monitor", "--course-id", "1"])
+        return result, monitor, session, check
+
+    def test_missing_or_empty_fallback_config_keeps_it_disabled(self):
+        for env in ({}, {"LLM_FALLBACK_API_BASE": "", "LLM_FALLBACK_API_KEY": "", "LLM_FALLBACK_MODEL": ""}):
+            with self.subTest(env=env):
+                result, monitor, _, check = self.invoke(env)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertNotIn("fallback", monitor.call_args.kwargs["llm_config"])
+                check.assert_called_once_with(**monitor.call_args.kwargs["llm_config"], debug=False)
+
+    def test_complete_fallback_config_is_forwarded_separately(self):
+        result, monitor, _, check = self.invoke({
+            "LLM_FALLBACK_API_BASE": ' "https://fallback.invalid/v1" ',
+            "LLM_FALLBACK_API_KEY": ' "fallback-key" ', "LLM_FALLBACK_MODEL": ' "fallback-model" ',
+        })
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(monitor.call_args.kwargs["llm_config"], {
+            "api_base": "https://primary.invalid/v1", "api_key": "primary-key", "model": "primary-model",
+            "fallback": {"api_base": "https://fallback.invalid/v1", "api_key": "fallback-key", "model": "fallback-model"},
+        })
+        self.assertNotIn("fallback-key", result.output)
+        check.assert_called_once_with(**monitor.call_args.kwargs["llm_config"], debug=False)
+
+    def test_partial_fallback_config_fails_before_network_or_model_startup(self):
+        keys = ("LLM_FALLBACK_API_BASE", "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL")
+        for mask in range(1, 7):
+            env = {key: "test" if mask & (1 << i) else "" for i, key in enumerate(keys)}
+            with self.subTest(env=env):
+                result, monitor, session, check = self.invoke(env)
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("must all be set", result.output)
+                monitor.assert_not_called()
+                session.assert_not_called()
+                check.assert_not_called()
+
+    def test_failed_startup_checks_do_not_disable_providers_or_abort_monitoring(self):
+        for primary_ok, fallback_ok in ((False, True), (True, False), (False, False)):
+            with self.subTest(primary_ok=primary_ok, fallback_ok=fallback_ok):
+                result, monitor, _, check = self.invoke({
+                    "LLM_FALLBACK_API_BASE": "https://fallback.invalid/v1",
+                    "LLM_FALLBACK_API_KEY": "fallback-key", "LLM_FALLBACK_MODEL": "fallback-model",
+                }, check_result={"primary": primary_ok, "fallback": fallback_ok})
+                self.assertEqual(result.exit_code, 0, result.output)
+                check.assert_called_once()
+                monitor.assert_called_once()
+                self.assertIn("fallback", monitor.call_args.kwargs["llm_config"])
 
 
 class MonitorModelReuseTests(unittest.TestCase):

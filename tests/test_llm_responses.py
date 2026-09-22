@@ -7,16 +7,24 @@ import unittest
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
+
+try:
+    import httpx
+    from openai import OpenAI as RealOpenAI
+except ImportError:
+    RealOpenAI = None
 
 from src.live_monitor import (
     _extract_llm_answer,
+    check_llm_apis,
     evaluate_alert_with_llm,
     monitor_loop,
 )
 
 
 CONFIG = {"api_base": "https://example.invalid/v1", "api_key": "test", "model": "test"}
+FALLBACK = {"api_base": "https://fallback.invalid/v1", "api_key": "fallback-key", "model": "fallback-model"}
 KEYWORDS = ["点到", "小测"]
 QUIZ_TEXT = "提醒大家，下周有小测。"
 PDP_TEXT = (
@@ -53,6 +61,29 @@ def mock_completion(content, reasoning_content="独立思考内容", finish_reas
     create.return_value = completion(content, reasoning_content, finish_reason)
     with patch.dict("sys.modules", {"openai": sdk}):
         yield create
+
+
+@contextmanager
+def mock_providers(primary_result, fallback_result):
+    sdk = ModuleType("openai")
+    primary, fallback = Mock(), Mock()
+    for client, result in ((primary, primary_result), (fallback, fallback_result)):
+        create = client.chat.completions.create
+        if isinstance(result, Exception):
+            create.side_effect = result
+        else:
+            create.return_value = completion(result)
+
+    def make_client(**kwargs):
+        if kwargs["base_url"] == CONFIG["api_base"]:
+            return primary
+        if kwargs["base_url"] == FALLBACK["api_base"]:
+            return fallback
+        raise AssertionError("Unexpected provider")
+
+    sdk.OpenAI = Mock(side_effect=make_client)
+    with patch.dict("sys.modules", {"openai": sdk}):
+        yield primary.chat.completions.create, fallback.chat.completions.create, sdk.OpenAI
 
 
 class ExtractAnswerTests(unittest.TestCase):
@@ -159,7 +190,7 @@ class LlmResponseTests(unittest.TestCase):
 
 
 class MonitorAlertTests(unittest.TestCase):
-    def run_monitor(self, texts, candidates=None, send_result=True):
+    def run_monitor(self, texts, candidates=None, send_result=True, llm_config=None):
         """Run real decision parsing and delivery routing; stub only I/O/ASR."""
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +212,7 @@ class MonitorAlertTests(unittest.TestCase):
                 monitor_loop(
                     Mock(), "87063", KEYWORDS, 30, "qwen3-asr-1.7b",
                     {"webhook": "test", "secret": "test", "at_mobiles": ["test-mobile"]},
-                    CONFIG, log_dir=tmp, course_title="测试课程", debug=True,
+                    llm_config or CONFIG, log_dir=tmp, course_title="测试课程", debug=True,
                 )
             self.assertTrue(all(not path.exists() for path in paths))
             log_text = next(Path(tmp).glob("87063_*.txt")).read_text(encoding="utf-8")
@@ -275,6 +306,242 @@ class MonitorAlertTests(unittest.TestCase):
             send, _ = self.run_monitor([QUIZ_TEXT], candidates=[None])
         create.assert_not_called()
         send.assert_not_called()
+
+
+    def test_fallback_result_controls_notification_after_primary_failure(self):
+        for verdict in (True, False, None):
+            fallback_result = decision_json(verdict) if verdict is not None else TimeoutError("fallback timeout")
+            with (
+                self.subTest(verdict=verdict),
+                mock_providers(TimeoutError("primary retries exhausted"), fallback_result) as (primary, fallback, _),
+                self.assertLogs("src.live_monitor", level="ERROR"),
+            ):
+                send, _ = self.run_monitor([QUIZ_TEXT], llm_config={**CONFIG, "fallback": FALLBACK})
+            primary.assert_called_once()
+            fallback.assert_called_once()
+            if verdict is False:
+                send.assert_not_called()
+            else:
+                send.assert_called_once()
+                message = send.call_args.kwargs["message"]
+                if verdict is True:
+                    self.assertIn("触发关键词：小测", message)
+                    self.assertNotIn("疑似命中", message)
+                else:
+                    self.assertIn("疑似命中（语义确认失败）", message)
+
+
+class LlmStartupCheckTests(unittest.TestCase):
+    def test_both_providers_are_checked_even_when_primary_succeeds(self):
+        answer = decision_json(evidence="现在开始小测", analysis="老师开始小测。")
+        output = io.StringIO()
+        with (
+            mock_providers(answer, "内部推理</think>" + answer) as (primary, fallback, _),
+            patch("src.notifier.send_dingtalk") as send,
+            redirect_stdout(output),
+        ):
+            results = check_llm_apis(**CONFIG, fallback=FALLBACK)
+        self.assertEqual(results, {"primary": True, "fallback": True})
+        primary.assert_called_once()
+        fallback.assert_called_once()
+        send.assert_not_called()
+        payload = json.loads(primary.call_args.kwargs["messages"][1]["content"])
+        self.assertEqual(payload, {
+            "keywords": ["小测"], "previous_transcripts": [],
+            "latest_transcript": "现在开始小测，请大家准备答题。",
+        })
+        self.assertIn("primary LLM check: OK", output.getvalue())
+        self.assertIn("fallback LLM check: OK", output.getvalue())
+
+    def test_request_or_validation_failure_is_reported_per_provider_without_sending_alerts(self):
+        for primary_result, fallback_result, expected in (
+            (TimeoutError("primary timeout"), decision_json(False), {"primary": False, "fallback": True}),
+            (decision_json(False), "not JSON", {"primary": True, "fallback": False}),
+            (TimeoutError("primary timeout"), TimeoutError("fallback timeout"), {"primary": False, "fallback": False}),
+        ):
+            output = io.StringIO()
+            with (
+                self.subTest(expected=expected),
+                mock_providers(primary_result, fallback_result) as (primary, fallback, _),
+                self.assertLogs("src.live_monitor", level="ERROR"),
+                patch("src.notifier.send_dingtalk") as send,
+                redirect_stdout(output),
+            ):
+                self.assertEqual(check_llm_apis(**CONFIG, fallback=FALLBACK), expected)
+            primary.assert_called_once()
+            fallback.assert_called_once()
+            send.assert_not_called()
+            self.assertIn("continuing monitoring", output.getvalue())
+            for provider, ok in expected.items():
+                self.assertIn(f"{provider} LLM check: {'OK' if ok else 'FAILED'}", output.getvalue())
+
+    def test_unconfigured_fallback_is_skipped_and_valid_negative_counts_as_success(self):
+        output = io.StringIO()
+        with mock_completion(decision_json(False)) as create, redirect_stdout(output):
+            self.assertEqual(check_llm_apis(**CONFIG), {"primary": True})
+        create.assert_called_once()
+        self.assertIn("SKIPPED (not configured)", output.getvalue())
+        self.assertNotIn("FAILED", output.getvalue())
+
+    def test_error_diagnostics_redact_api_key_if_provider_echoes_it(self):
+        with (
+            mock_completion(None) as create,
+            self.assertLogs("src.live_monitor", level="ERROR") as logs,
+            redirect_stdout(io.StringIO()),
+        ):
+            create.side_effect = RuntimeError("Invalid API key: secret-probe-key")
+            results = check_llm_apis(**{**CONFIG, "api_key": "secret-probe-key"})
+        self.assertFalse(results["primary"])
+        self.assertNotIn("secret-probe-key", "".join(logs.output))
+        self.assertIn("<redacted>", "".join(logs.output))
+
+
+class LlmFallbackTests(unittest.TestCase):
+    def evaluate(self, **kwargs):
+        return evaluate_alert_with_llm(QUIZ_TEXT, [QUIZ_TEXT], KEYWORDS, **CONFIG, fallback=FALLBACK, **kwargs)
+
+    def test_valid_primary_positive_or_negative_does_not_call_fallback(self):
+        for verdict in (True, False):
+            with self.subTest(verdict=verdict), mock_providers(decision_json(verdict), None) as (primary, fallback, constructor):
+                result = self.evaluate()
+            self.assertEqual(result.should_alert, verdict)
+            primary.assert_called_once()
+            fallback.assert_not_called()
+            constructor.assert_called_once_with(api_key=CONFIG["api_key"], base_url=CONFIG["api_base"], max_retries=2)
+
+    def test_fallback_uses_own_credentials_and_model_but_same_context(self):
+        output = io.StringIO()
+        with (
+            mock_providers(TimeoutError("primary retries exhausted"), "内部思考</think>" + decision_json()) as (primary, fallback, constructor),
+            self.assertLogs("src.live_monitor", level="ERROR") as logs,
+            redirect_stdout(output),
+        ):
+            result = self.evaluate(debug=True)
+        self.assertTrue(result.should_alert)
+        self.assertEqual(result.evidence, "下周有小测")
+        self.assertEqual(constructor.call_args_list, [
+            call(api_key=CONFIG["api_key"], base_url=CONFIG["api_base"], max_retries=2),
+            call(api_key=FALLBACK["api_key"], base_url=FALLBACK["api_base"], max_retries=2),
+        ])
+        self.assertEqual(primary.call_args.kwargs["model"], CONFIG["model"])
+        self.assertEqual(fallback.call_args.kwargs, {**primary.call_args.kwargs, "model": FALLBACK["model"]})
+        self.assertIn("trying fallback LLM", output.getvalue())
+        self.assertIn("Fallback LLM decision", output.getvalue())
+        self.assertNotIn("内部思考", output.getvalue())
+        self.assertNotIn(FALLBACK["api_key"], output.getvalue() + "".join(logs.output))
+
+    def test_unusable_primary_response_also_tries_fallback(self):
+        for content in ("not JSON", decision_json(evidence="原文中没有的话"), "<think>还没结束"):
+            with (
+                self.subTest(content=content), mock_providers(content, decision_json(False)) as (primary, fallback, _),
+                self.assertLogs("src.live_monitor", level="ERROR"), redirect_stdout(io.StringIO()),
+            ):
+                result = self.evaluate()
+            self.assertFalse(result.should_alert)
+            primary.assert_called_once()
+            fallback.assert_called_once()
+
+    def test_failed_or_invalid_fallback_returns_unconfirmed(self):
+        for fallback_result in (TimeoutError("fallback retries exhausted"), "not JSON", decision_json(evidence="原文中没有的话")):
+            with (
+                self.subTest(fallback_result=fallback_result),
+                mock_providers(TimeoutError("primary retries exhausted"), fallback_result) as (primary, fallback, _),
+                self.assertLogs("src.live_monitor", level="ERROR"), redirect_stdout(io.StringIO()),
+            ):
+                self.assertIsNone(self.evaluate())
+            primary.assert_called_once()
+            fallback.assert_called_once()
+
+    def test_next_chunk_starts_with_primary_again(self):
+        with (
+            mock_providers(None, decision_json()) as (primary, fallback, _),
+            self.assertLogs("src.live_monitor", level="ERROR"), redirect_stdout(io.StringIO()),
+        ):
+            primary.side_effect = [TimeoutError("primary retries exhausted"), completion(decision_json(False))]
+            self.assertTrue(self.evaluate().should_alert)
+            self.assertFalse(self.evaluate().should_alert)
+        self.assertEqual(primary.call_count, 2)
+        fallback.assert_called_once()
+
+
+@unittest.skipIf(RealOpenAI is None, "Install openai and httpx to exercise SDK retries with a mock HTTP transport")
+class SdkRetryFallbackTests(unittest.TestCase):
+    """Exercise real SDK retries, without any network requests or retry sleeps."""
+
+    def evaluate_with_transport(self, handler):
+        clients = []
+
+        def make_client(**kwargs):
+            client = RealOpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+            clients.append(client)
+            return client
+
+        try:
+            with (
+                patch("openai.OpenAI", side_effect=make_client), patch("time.sleep"),
+                patch("src.live_monitor.logger"), redirect_stdout(io.StringIO()),
+            ):
+                return evaluate_alert_with_llm(QUIZ_TEXT, [QUIZ_TEXT], KEYWORDS, **CONFIG, fallback=FALLBACK)
+        finally:
+            for client in clients:
+                client.close()
+
+    @staticmethod
+    def success_response():
+        return httpx.Response(200, json={
+            "id": "test-completion", "object": "chat.completion", "created": 0, "model": "test",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": decision_json()}}],
+        })
+
+    def test_transient_errors_exhaust_primary_retries_before_fallback(self):
+        for failure in (429, 503, "timeout"):
+            requests_seen = []
+
+            def handler(request):
+                requests_seen.append(request.url.host)
+                if request.url.host == "example.invalid":
+                    if failure == "timeout":
+                        raise httpx.ReadTimeout("test timeout", request=request)
+                    return httpx.Response(failure, json={"error": {"message": "test failure"}})
+                return self.success_response()
+
+            with self.subTest(failure=failure):
+                self.assertTrue(self.evaluate_with_transport(handler).should_alert)
+                self.assertEqual(requests_seen, ["example.invalid"] * 3 + ["fallback.invalid"])
+
+    def test_primary_can_recover_on_retry_without_calling_fallback(self):
+        requests_seen = []
+
+        def handler(request):
+            requests_seen.append(request.url.host)
+            if len(requests_seen) < 3:
+                return httpx.Response(503, json={"error": {"message": "test failure"}})
+            return self.success_response()
+
+        self.assertTrue(self.evaluate_with_transport(handler).should_alert)
+        self.assertEqual(requests_seen, ["example.invalid"] * 3)
+
+    def test_both_providers_exhaust_retries_before_returning_unconfirmed(self):
+        requests_seen = []
+
+        def handler(request):
+            requests_seen.append(request.url.host)
+            return httpx.Response(503, json={"error": {"message": "test failure"}})
+
+        self.assertIsNone(self.evaluate_with_transport(handler))
+        self.assertEqual(requests_seen, ["example.invalid"] * 3 + ["fallback.invalid"] * 3)
+
+    def test_non_retryable_auth_error_switches_without_repeating_bad_credentials(self):
+        requests_seen = []
+
+        def handler(request):
+            requests_seen.append(request.url.host)
+            if request.url.host == "example.invalid":
+                return httpx.Response(401, json={"error": {"message": "invalid key"}})
+            return self.success_response()
+
+        self.assertTrue(self.evaluate_with_transport(handler).should_alert)
+        self.assertEqual(requests_seen, ["example.invalid", "fallback.invalid"])
 
 
 if __name__ == "__main__":
