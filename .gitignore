@@ -4,3 +4,4 @@ src/__pycache__/
 chunks/
 logs/
 .vscode
+__pycache__

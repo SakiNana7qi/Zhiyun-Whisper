@@ -27,9 +27,7 @@ def _get_credentials() -> tuple[str, str]:
 
 def _get_session(require_auth: bool = False) -> "requests.Session":
     """
-    Create an HTTP session. The Zhiyun Classroom catalogue API works
-    without CAS authentication for most courses. If auth is needed,
-    set require_auth=True.
+    Create an HTTP session, optionally authenticated through CAS and a JWT.
     """
     import requests
 
@@ -44,11 +42,48 @@ def _get_session(require_auth: bool = False) -> "requests.Session":
         }
     )
     if require_auth:
-        from src.auth import login
+        from src.auth import refresh_token
 
         username, password = _get_credentials()
-        session = login(username, password)
+        session, _ = refresh_token(username, password)
     return session
+
+
+def _fetch_lessons_with_auth(session, course_id: str):
+    """Retry an unauthorized catalogue request with a token, then a fresh login."""
+    from src.auth import refresh_token
+    from src.crawler import CatalogueAuthError, fetch_lessons
+
+    try:
+        return fetch_lessons(session, course_id)
+    except CatalogueAuthError:
+        pass
+
+    token = os.getenv("ZJU_TOKEN", "").strip().strip('"')
+    if token:
+        click.echo("  Catalogue requires authentication; trying ZJU_TOKEN...")
+        session.headers.update({"Authorization": f"Bearer {token}"})
+        try:
+            return fetch_lessons(session, course_id)
+        except CatalogueAuthError:
+            pass
+
+    username = os.getenv("ZJU_USERNAME", "").strip().strip('"')
+    password = os.getenv("ZJU_PASSWORD", "").strip().strip('"')
+    if not username or not password:
+        raise click.ClickException(
+            "Course catalogue requires valid authentication. Set ZJU_USERNAME and "
+            "ZJU_PASSWORD in .env for automatic login, or provide a valid ZJU_TOKEN."
+        )
+
+    click.echo("  Authenticating with ZJU_USERNAME/ZJU_PASSWORD...")
+    session, _ = refresh_token(username, password)
+    try:
+        return fetch_lessons(session, course_id)
+    except CatalogueAuthError as exc:
+        raise click.ClickException(
+            "Course catalogue still rejected authentication after login."
+        ) from exc
 
 
 @click.group()
@@ -94,7 +129,7 @@ def transcribe(
     url: str, mode: str, model: str, language: str, output_dir: str, batch_size: int | None
 ):
     """Transcribe a Zhiyun Classroom lesson from URL."""
-    from src.crawler import parse_url, fetch_lessons, download_audio
+    from src.crawler import parse_url, download_audio
     from src.transcriber import transcribe_local, transcribe_api
     from src.formatter import save_txt, save_srt
 
@@ -105,14 +140,14 @@ def transcribe(
     sub_id = params.get("sub_id")
     click.echo(f"  course_id={course_id}, sub_id={sub_id}")
 
-    # 2. Create session (API works without CAS auth for most courses)
+    # 2. Create session; catalogue authentication is retried when required.
     click.echo("[2/5] Connecting to Zhiyun Classroom...")
     session = _get_session()
-    click.echo("  Connected!")
+    click.echo("  Session ready")
 
     # 3. Fetch video URL
     click.echo("[3/5] Fetching course catalogue...")
-    lessons = fetch_lessons(session, course_id)
+    lessons = _fetch_lessons_with_auth(session, course_id)
 
     target = None
     if sub_id:
@@ -190,13 +225,11 @@ def transcribe(
 )
 def list_lessons(course_id: str):
     """List all lessons for a course."""
-    from src.crawler import fetch_lessons
-
     click.echo("Connecting to Zhiyun Classroom...")
     session = _get_session()
 
     click.echo(f"Fetching lessons for course_id={course_id}...")
-    lessons = fetch_lessons(session, course_id)
+    lessons = _fetch_lessons_with_auth(session, course_id)
 
     click.echo(f"\nFound {len(lessons)} lesson(s):\n")
     for i, lesson in enumerate(lessons, start=1):

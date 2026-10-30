@@ -18,6 +18,10 @@ import requests
 CATALOGUE_API = "https://classroom.zju.edu.cn/courseapi/v2/course/catalogue"
 
 
+class CatalogueAuthError(RuntimeError):
+    """The course catalogue requires valid authentication."""
+
+
 @dataclass
 class Lesson:
     """Represents a single lesson/recording in a course."""
@@ -88,8 +92,17 @@ def fetch_lessons(session: requests.Session, course_id: str) -> list[Lesson]:
     Returns a list of Lesson objects (video_url may be None if no playback).
     """
     resp = session.get(CATALOGUE_API, params={"course_id": course_id})
+    if resp.status_code == 401:
+        raise CatalogueAuthError("Course catalogue authentication required")
     resp.raise_for_status()
     data = resp.json()
+
+    result = data.get("result")
+    if isinstance(result, dict) and (
+        str(result.get("status")) == "401" or result.get("name") == "Unauthorized"
+    ):
+        # The API can return HTTP 200 with an authentication error in the body.
+        raise CatalogueAuthError("Course catalogue authentication required")
 
     if not data.get("success") or not data.get("result", {}).get("data"):
         raise RuntimeError(

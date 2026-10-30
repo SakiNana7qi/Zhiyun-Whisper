@@ -1,6 +1,7 @@
 """Offline regressions for legacy and interactivemeta recording support."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,8 +9,8 @@ from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 
-from main import cli
-from src.crawler import fetch_lessons, parse_url
+from main import cli, _fetch_lessons_with_auth
+from src.crawler import CatalogueAuthError, fetch_lessons, parse_url
 from src.transcriber import Segment
 
 
@@ -84,6 +85,19 @@ class ReplayUrlTests(unittest.TestCase):
 
 
 class CatalogueTests(unittest.TestCase):
+    def test_authentication_errors_are_identified_for_http_and_json_401(self):
+        for http_status, body in (
+            (401, {}),
+            (200, {"success": False, "result": {"status": 401, "name": "Unauthorized"}}),
+            (200, {"success": False, "result": {"status": "401"}}),
+        ):
+            with self.subTest(http_status=http_status, body=body):
+                session = Mock()
+                session.get.return_value.status_code = http_status
+                session.get.return_value.json.return_value = body
+                with self.assertRaises(CatalogueAuthError):
+                    fetch_lessons(session, "86161")
+
     def test_old_and_new_playback_shapes(self):
         cases = [
             ({"playback": {"url": VIDEO_URL}}, VIDEO_URL),
@@ -132,6 +146,79 @@ class CatalogueTests(unittest.TestCase):
         content = {"playback": {"url": []}, "url": VIDEO_URL}
         session = catalogue_session([catalogue_item("1967175", content)])
         self.assertEqual(fetch_lessons(session, "86830")[0].video_url, VIDEO_URL)
+
+
+class CatalogueAuthenticationTests(unittest.TestCase):
+    def test_anonymous_access_does_not_require_credentials(self):
+        session = catalogue_session([catalogue_item("1", {})])
+        with patch("src.auth.refresh_token") as refresh:
+            self.assertEqual(len(_fetch_lessons_with_auth(session, "86161")), 1)
+        refresh.assert_not_called()
+
+    def test_configured_token_is_used_before_login(self):
+        session = catalogue_session([catalogue_item("1", {})])
+        session.get.return_value.status_code = 200
+        session.get.return_value.json.side_effect = [
+            {"success": False, "result": {"status": 401}},
+            {"success": True, "result": {"data": [catalogue_item("1", {})]}},
+        ]
+        with (
+            patch.dict(os.environ, {"ZJU_TOKEN": "test-token"}, clear=True),
+            patch("src.auth.refresh_token") as refresh,
+        ):
+            self.assertEqual(len(_fetch_lessons_with_auth(session, "86161")), 1)
+        session.headers.update.assert_called_once_with({"Authorization": "Bearer test-token"})
+        refresh.assert_not_called()
+
+    def test_missing_or_rejected_token_triggers_one_fresh_login(self):
+        for token, expected_attempts in (("", 1), ("expired-token", 2)):
+            with self.subTest(token=token):
+                anonymous = Mock()
+                anonymous.get.return_value.status_code = 200
+                anonymous.get.return_value.json.return_value = {
+                    "success": False, "result": {"name": "Unauthorized", "status": 401},
+                }
+                authenticated = catalogue_session([catalogue_item("1", {})])
+                with (
+                    patch.dict(os.environ, {
+                        "ZJU_TOKEN": token, "ZJU_USERNAME": "student", "ZJU_PASSWORD": "password",
+                    }, clear=True),
+                    patch("src.auth.refresh_token", return_value=(authenticated, "fresh-token")) as refresh,
+                ):
+                    self.assertEqual(len(_fetch_lessons_with_auth(anonymous, "86161")), 1)
+                self.assertEqual(anonymous.get.call_count, expected_attempts)
+                refresh.assert_called_once_with("student", "password")
+                authenticated.get.assert_called_once()
+
+    def test_no_credentials_gives_actionable_error(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("src.crawler.fetch_lessons", side_effect=CatalogueAuthError),
+            patch("src.auth.refresh_token") as refresh,
+        ):
+            with self.assertRaisesRegex(Exception, "Set ZJU_USERNAME"):
+                _fetch_lessons_with_auth(Mock(), "86161")
+        refresh.assert_not_called()
+
+    def test_rejected_fresh_login_stops_retrying(self):
+        with (
+            patch.dict(os.environ, {"ZJU_USERNAME": "student", "ZJU_PASSWORD": "password"}, clear=True),
+            patch("src.crawler.fetch_lessons", side_effect=CatalogueAuthError) as fetch,
+            patch("src.auth.refresh_token", return_value=(Mock(), "fresh")) as refresh,
+        ):
+            with self.assertRaisesRegex(Exception, "still rejected"):
+                _fetch_lessons_with_auth(Mock(), "86161")
+        self.assertEqual(fetch.call_count, 2)
+        refresh.assert_called_once()
+
+    def test_other_catalogue_errors_do_not_trigger_login(self):
+        with (
+            patch("src.crawler.fetch_lessons", side_effect=RuntimeError("service unavailable")),
+            patch("src.auth.refresh_token") as refresh,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "service unavailable"):
+                _fetch_lessons_with_auth(Mock(), "86161")
+        refresh.assert_not_called()
 
 
 class TranscribeCommandTests(unittest.TestCase):
