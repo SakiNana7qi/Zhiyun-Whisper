@@ -68,12 +68,12 @@ def fetch_live_courses(token: str) -> list[dict]:
     # Decode JWT payload (no signature verification needed)
     try:
         payload_b64 = token.split(".")[1]
-        payload_b64 += "=" * (4 - len(payload_b64) % 4)
-        payload = json.loads(base64.b64decode(payload_b64))
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
         user_id = payload["sub"]
         tenant_id = payload["tenant_id"]
-    except Exception as exc:
-        raise RuntimeError(f"Failed to decode ZJU_TOKEN JWT: {exc}") from exc
+    except Exception:
+        raise RuntimeError("Failed to decode ZJU_TOKEN JWT") from None
 
     today = date.today().isoformat()
     try:
@@ -89,16 +89,35 @@ def fetch_live_courses(token: str) -> list[dict]:
             },
             timeout=10,
         )
+        if resp.status_code in (401, 403):
+            raise TokenExpiredError(
+                f"Schedule API rejected authentication (HTTP {resp.status_code})"
+            )
         resp.raise_for_status()
         data = resp.json()
+    except TokenExpiredError:
+        raise
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        raise RuntimeError(f"Schedule API request failed (HTTP {status})") from None
     except Exception as exc:
-        raise RuntimeError(f"Schedule API request failed: {exc}") from exc
+        # Request exceptions include the complete URL, which contains the JWT.
+        raise RuntimeError(f"Schedule API request failed ({type(exc).__name__})") from None
 
     # Flatten all course items across all days
     raw_result = data.get("result", {})
+    if not isinstance(raw_result, dict):
+        raise RuntimeError("Schedule API returned an invalid result")
+    if (
+        str(raw_result.get("status")) in ("401", "403")
+        or raw_result.get("name") in ("Unauthorized", "Forbidden")
+    ):
+        raise TokenExpiredError("Schedule API rejected authentication")
     # Server returns error string in data field when token is expired
     if isinstance(raw_result.get("data"), str) and "认证失败" in raw_result["data"]:
-        raise TokenExpiredError(raw_result["data"])
+        raise TokenExpiredError("Schedule API rejected authentication")
+    if data.get("success") is False:
+        raise RuntimeError("Schedule API returned an unsuccessful response")
 
     live = []
     for day_entry in raw_result.get("list", []):

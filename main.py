@@ -432,7 +432,10 @@ def monitor(
                     continue
                 else:
                     click.echo(
-                        "Token expired and no credentials available to refresh.",
+                        "Schedule authentication failed after 3 refresh attempts."
+                        if credentials else
+                        "Schedule authentication failed. Set ZJU_USERNAME and ZJU_PASSWORD "
+                        "in .env to refresh the token automatically.",
                         err=True,
                     )
                     sys.exit(1)
