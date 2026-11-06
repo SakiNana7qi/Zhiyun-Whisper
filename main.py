@@ -293,6 +293,12 @@ def list_lessons(course_id: str):
     help="Directory for persistent transcript logs",
 )
 @click.option(
+    "--llm-all-chunks",
+    is_flag=True,
+    default=False,
+    help="Send every non-empty transcript to the LLM, bypassing pinyin keyword matching",
+)
+@click.option(
     "--debug",
     is_flag=True,
     default=False,
@@ -308,6 +314,7 @@ def monitor(
     log_dir,
     debug,
     batch_size,
+    llm_all_chunks,
 ):
     """Monitor a Zhiyun live stream and send DingTalk alerts on keyword detection."""
     from src.live_monitor import monitor_loop, fetch_live_courses, TokenExpiredError, check_llm_apis
@@ -365,6 +372,8 @@ def monitor(
 
     keyword_list = [kw.strip() for kw in keywords.split(",") if kw.strip()]
     click.echo(f"Monitoring course {course_id} for keywords: {keyword_list}")
+    if llm_all_chunks:
+        click.echo("LLM checks enabled for every non-empty chunk (pinyin matching bypassed)")
 
     # Load course priority list from .env
     priority_raw = os.getenv("MONITOR_PRIORITY", "").strip().strip('"')
@@ -500,6 +509,7 @@ def monitor(
         debug=debug,
         credentials=credentials,
         batch_size=batch_size,
+        llm_all_chunks=llm_all_chunks,
     )
 
 

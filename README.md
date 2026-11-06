@@ -168,6 +168,11 @@ python main.py monitor --course-id 81706
 # 自定义关键词
 python main.py monitor --keywords "小测,随堂测验,点名"
 
+# 每段非空转录直接交给 LLM，跳过拼音和关键词预筛选
+python main.py monitor --llm-all-chunks
+# 循环运行脚本也可传入这个开关
+bash mloop.sh --llm-all-chunks
+
 # 调试模式（打印每个 30s 音频块的转录文本和 LLM 分析）
 python main.py monitor --debug
 
@@ -188,6 +193,7 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 | `--chunks-dir` | `chunks` | 临时音频切片目录（处理后删除） |
 | `--log-dir` | `logs` | 转录日志目录（永久保留） |
 | `--debug` | 关 | 打印每段转录文本和 LLM 响应 |
+| `--llm-all-chunks` | 关 | 跳过拼音和关键词预筛选，每段非空转录都交给 LLM；通知冷却期间也继续检验 |
 
 **多课程自动选择：**
 
@@ -205,6 +211,8 @@ python main.py monitor --log-dir logs --chunks-dir chunks
 5. 命中后（包括逐字命中）用一次 LLM 调用返回结构化判断、确认关键词、原文证据和解释；结合最近 3 段语境，以最新片段为判断对象
 6. 确认后通过钉钉 Webhook 推送告警（含课程名称、时间、确认关键词、证据、分析、最近转录原文），发送成功后 120 秒冷却；明确否定时不推送。主 LLM 调用或结果校验失败时尝试已配置的备用 LLM，所有已配置服务均失败后发送标明「疑似命中（语义确认失败）」的提醒
 7. 网络中断或 auth_key 过期时自动重连；直播结束（status 变化）时退出
+
+开启 `--llm-all-chunks` 后，第 4 步的预筛选被跳过，LLM 仍根据 `--keywords` 的全部关键词和最近语境判断。120 秒冷却仅限制通知，不跳过 LLM 检验；主备 LLM 均失败时发送「语义检验失败（未确认）」提醒，不声称有拼音命中。此模式避免预筛选漏掉片段，但转录或 LLM 判断仍可能漏检。
 
 语义判断仍按「提及相关事项就提醒」，包括预告、回顾或否定该事项，不要求正在执行。提示词要求区分「分享到／来到」与考勤「点到」、测试与随堂小测。确认关键词必须来自配置列表，证据必须能在最新转录中找到；标题使用 LLM 确认的关键词。模型的默认思考模式保持不变，仅解析最终正文中的 JSON 判断。
 

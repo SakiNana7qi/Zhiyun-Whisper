@@ -190,7 +190,7 @@ class LlmResponseTests(unittest.TestCase):
 
 
 class MonitorAlertTests(unittest.TestCase):
-    def run_monitor(self, texts, candidates=None, send_result=True, llm_config=None):
+    def run_monitor(self, texts, candidates=None, send_result=True, llm_config=None, llm_all_chunks=False):
         """Run real decision parsing and delivery routing; stub only I/O/ASR."""
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,7 +203,7 @@ class MonitorAlertTests(unittest.TestCase):
                 patch("src.live_monitor.stream_audio_chunks", return_value=iter(map(str, paths))),
                 patch("src.transcriber.load_local_model") as load,
                 patch("src.live_monitor.is_stream_ended", return_value=False),
-                patch("src.live_monitor.check_keywords_pinyin", side_effect=candidates or [("点到", 88)] * len(texts)),
+                patch("src.live_monitor.check_keywords_pinyin", side_effect=candidates or [("点到", 88)] * len(texts)) as pinyin,
                 patch("src.notifier.send_dingtalk", return_value=send_result) as send,
                 patch("src.live_monitor.time.sleep"), patch("src.live_monitor.time.time", return_value=1000),
                 redirect_stdout(output),
@@ -213,11 +213,15 @@ class MonitorAlertTests(unittest.TestCase):
                     Mock(), "87063", KEYWORDS, 30, "qwen3-asr-1.7b",
                     {"webhook": "test", "secret": "test", "at_mobiles": ["test-mobile"]},
                     llm_config or CONFIG, log_dir=tmp, course_title="测试课程", debug=True,
+                    llm_all_chunks=llm_all_chunks,
                 )
+                if llm_all_chunks:
+                    pinyin.assert_not_called()
             self.assertTrue(all(not path.exists() for path in paths))
             log_text = next(Path(tmp).glob("87063_*.txt")).read_text(encoding="utf-8")
             for text in texts:
-                self.assertIn(text, log_text)
+                if text.strip():
+                    self.assertIn(text, log_text)
         return send, output.getvalue()
 
     def test_pdp_negative_decision_never_notifies(self):
@@ -306,6 +310,52 @@ class MonitorAlertTests(unittest.TestCase):
             send, _ = self.run_monitor([QUIZ_TEXT], candidates=[None])
         create.assert_not_called()
         send.assert_not_called()
+
+    def test_all_chunks_checks_without_pinyin_and_uses_llm_verdict(self):
+        with mock_completion(None) as create:
+            create.side_effect = [completion(decision_json(False)), completion(decision_json())]
+            send, _ = self.run_monitor([PDP_TEXT, QUIZ_TEXT], candidates=[None, None], llm_all_chunks=True)
+        self.assertEqual(create.call_count, 2)
+        send.assert_called_once()
+        self.assertIn("触发关键词：小测", send.call_args.kwargs["message"])
+
+    def test_all_chunks_keeps_checking_during_notification_cooldown(self):
+        with mock_completion(decision_json()) as create:
+            send, output = self.run_monitor([QUIZ_TEXT, QUIZ_TEXT], llm_all_chunks=True)
+        self.assertEqual(create.call_count, 2)
+        send.assert_called_once()
+        self.assertIn("in cooldown, skipping alert", output)
+
+    def test_all_chunks_skips_empty_transcripts(self):
+        with mock_completion(decision_json()) as create:
+            send, _ = self.run_monitor(["   ", QUIZ_TEXT], llm_all_chunks=True)
+        create.assert_called_once()
+        send.assert_called_once()
+
+    def test_all_chunks_fallback_verdict_and_failure_are_reported_truthfully(self):
+        for verdict in (True, False, None):
+            fallback_result = decision_json(verdict) if verdict is not None else TimeoutError("fallback timeout")
+            with (
+                self.subTest(verdict=verdict),
+                mock_providers(TimeoutError("primary retries exhausted"), fallback_result) as (primary, fallback, _),
+                self.assertLogs("src.live_monitor", level="ERROR"),
+            ):
+                send, _ = self.run_monitor(
+                    [QUIZ_TEXT], llm_config={**CONFIG, "fallback": FALLBACK}, llm_all_chunks=True,
+                )
+            primary.assert_called_once()
+            fallback.assert_called_once()
+            if verdict is False:
+                send.assert_not_called()
+            else:
+                send.assert_called_once()
+                message = send.call_args.kwargs["message"]
+                if verdict is True:
+                    self.assertIn("触发关键词：小测", message)
+                else:
+                    self.assertIn("语义检验失败（未确认）", message)
+                    self.assertNotIn("拼音匹配命中", message)
+                    self.assertNotIn("候选关键词", message)
 
 
     def test_fallback_result_controls_notification_after_primary_failure(self):

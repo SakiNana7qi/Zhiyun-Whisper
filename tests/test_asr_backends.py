@@ -187,7 +187,8 @@ class AsrCommandTests(unittest.TestCase):
                   "LLM_API_BASE": "test", "LLM_API_KEY": "test",
                   "LLM_FALLBACK_API_BASE": "", "LLM_FALLBACK_API_KEY": "", "LLM_FALLBACK_MODEL": ""}
         for args, model, batch in (([], "qwen3-asr-1.7b", None), (["--model", "0.6b", "--batch-size", "2"], "0.6b", 2),
-                                   (["--model", "small"], "small", None)):
+                                   (["--model", "small"], "small", None),
+                                   (["--llm-all-chunks"], "qwen3-asr-1.7b", None)):
             with (
                 self.subTest(args=args), patch.dict("sys.modules", {"src.auth": auth}), patch.dict("os.environ", config),
                 patch("src.live_monitor.check_llm_apis"),
@@ -197,6 +198,7 @@ class AsrCommandTests(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertEqual(monitor.call_args.kwargs["model_size"], model)
                 self.assertEqual(monitor.call_args.kwargs["batch_size"], batch)
+                self.assertEqual(monitor.call_args.kwargs["llm_all_chunks"], "--llm-all-chunks" in args)
 
     def test_invalid_batch_is_rejected_before_startup(self):
         for command in (["monitor"], ["transcribe", "https://example.invalid"]):

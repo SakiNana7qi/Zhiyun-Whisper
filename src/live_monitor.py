@@ -645,7 +645,7 @@ def is_stream_ended(session: requests.Session, course_id: str, live_sub_id: str)
 
 
 def _build_message(
-    candidate_keyword: str,
+    candidate_keyword: str | None,
     course_id: str,
     course_title: str,
     recent_entries: list[str],
@@ -655,8 +655,12 @@ def _build_message(
     title_str = f"{course_title}（{course_id}）" if course_title else course_id
     recent_str = "\n".join(recent_entries[-3:])
     if decision is None:
-        heading = f"[智云直播监控] 疑似命中（语义确认失败）\n候选关键词：{candidate_keyword}"
-        details = "分析：LLM 调用或结果校验失败，仅拼音匹配命中，尚未确认相关事项，请结合原文核实。"
+        if candidate_keyword is None:
+            heading = "[智云直播监控] 语义检验失败（未确认）"
+            details = "分析：LLM 调用或结果校验失败，本片段未完成语义检验，请结合原文核实。"
+        else:
+            heading = f"[智云直播监控] 疑似命中（语义确认失败）\n候选关键词：{candidate_keyword}"
+            details = "分析：LLM 调用或结果校验失败，仅拼音匹配命中，尚未确认相关事项，请结合原文核实。"
     else:
         if not decision.should_alert:
             raise ValueError("Cannot build an alert for a negative decision")
@@ -691,6 +695,7 @@ def monitor_loop(
     debug: bool = False,
     credentials: tuple[str, str] | None = None,
     batch_size: int | None = None,
+    llm_all_chunks: bool = False,
 ) -> None:
     """
     Full monitoring pipeline:
@@ -699,8 +704,9 @@ def monitor_loop(
     2. Load the selected ASR model once.
     3. For each 30-second audio chunk:
        a. Transcribe with the pre-loaded model.
-       b. Run pinyin fuzzy keyword match.
-       c. On match, obtain one LLM decision with evidence and analysis.
+       b. Run pinyin fuzzy keyword match (unless llm_all_chunks is enabled).
+       c. Obtain one LLM decision on a match, or for every non-empty chunk
+          with llm_all_chunks, including during notification cooldown.
        d. Send confirmed or explicitly unconfirmed fallback notifications,
           with a 120-second cooldown between delivered alerts.
        e. Delete the chunk to save disk space.
@@ -819,35 +825,40 @@ def monitor_loop(
                     if debug:
                         print(f"[debug] {full_text}")
 
-                    result = check_keywords_pinyin(full_text, keywords)
-                    if result is None:
-                        continue
-
-                    kw, score = result
-                    now = time.time()
-
-                    if now - last_alert_time < 120:
+                    kw = None
+                    if llm_all_chunks:
+                        print("[monitor] Checking transcript with LLM (pinyin matching bypassed)...")
+                    else:
+                        result = check_keywords_pinyin(full_text, keywords)
+                        if result is None:
+                            continue
+                        kw, score = result
+                        if time.time() - last_alert_time < 120:
+                            print(
+                                f"[monitor] Keyword '{kw}' matched (score={score:.0f}) but in cooldown, skipping"
+                            )
+                            continue
                         print(
-                            f"[monitor] Keyword '{kw}' matched (score={score:.0f}) but in cooldown, skipping"
+                            f"[monitor] Keyword '{kw}' matched (score={score:.0f}), confirming with LLM..."
                         )
-                        continue
-
-                    print(
-                        f"[monitor] Keyword '{kw}' matched (score={score:.0f}), confirming with LLM..."
-                    )
                     decision = evaluate_alert_with_llm(
                         full_text, list(recent_entries), keywords, **llm_config, debug=debug
                     )
                     if decision is not None and not decision.should_alert:
                         print(
-                            f"[monitor] LLM did not confirm candidate '{kw}', "
+                            "[monitor] LLM did not confirm related content, "
                             f"skipping alert: {decision.analysis}"
                         )
                         continue
 
+                    now = time.time()
+                    if llm_all_chunks and now - last_alert_time < 120:
+                        print("[monitor] LLM check complete but in cooldown, skipping alert")
+                        continue
+
                     if decision is None:
-                        print("[monitor] LLM confirmation failed; sending an unconfirmed candidate alert")
-                        alert_label = f"unconfirmed candidate '{kw}'"
+                        print("[monitor] LLM confirmation failed; sending an unconfirmed alert")
+                        alert_label = f"unconfirmed candidate '{kw}'" if kw else "unchecked transcript"
                     else:
                         alert_label = f"confirmed keywords '{'、'.join(decision.matched_keywords)}'"
                     message = _build_message(
