@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import requests
 from click.testing import CliRunner
 
 from main import cli, _fetch_lessons_with_auth
@@ -85,11 +86,15 @@ class ReplayUrlTests(unittest.TestCase):
 
 
 class CatalogueTests(unittest.TestCase):
-    def test_authentication_errors_are_identified_for_http_and_json_401(self):
+    def test_authentication_errors_are_identified_for_http_and_json_401_and_403(self):
         for http_status, body in (
             (401, {}),
+            (403, {}),
             (200, {"success": False, "result": {"status": 401, "name": "Unauthorized"}}),
             (200, {"success": False, "result": {"status": "401"}}),
+            (200, {"success": False, "result": {"status": 403}}),
+            (200, {"success": False, "result": {"status": "403"}}),
+            (200, {"success": False, "result": {"name": "Forbidden"}}),
         ):
             with self.subTest(http_status=http_status, body=body):
                 session = Mock()
@@ -149,6 +154,40 @@ class CatalogueTests(unittest.TestCase):
 
 
 class CatalogueAuthenticationTests(unittest.TestCase):
+    def test_http_403_retries_token_then_fresh_login(self):
+        response = requests.Response()
+        response.status_code = 403
+        response.url = "https://classroom.zju.edu.cn/courseapi/v2/course/catalogue?course_id=86161"
+        session = Mock()
+        session.get.return_value = response
+        authenticated = catalogue_session([catalogue_item("1989000", {"url": VIDEO_URL})])
+        with (
+            patch.dict(os.environ, {
+                "ZJU_TOKEN": "expired-token", "ZJU_USERNAME": "student", "ZJU_PASSWORD": "password",
+            }, clear=True),
+            patch("src.auth.refresh_token", return_value=(authenticated, "fresh-token")) as refresh,
+        ):
+            lessons = _fetch_lessons_with_auth(session, "86161")
+        self.assertEqual(session.get.call_count, 2)
+        session.headers.update.assert_called_once_with({"Authorization": "Bearer expired-token"})
+        refresh.assert_called_once_with("student", "password")
+        self.assertEqual(lessons[0].sub_id, "1989000")
+        self.assertEqual(lessons[0].video_url, VIDEO_URL)
+
+    def test_http_403_after_fresh_login_stops_with_clear_error(self):
+        response = requests.Response()
+        response.status_code = 403
+        session = Mock()
+        session.get.return_value = response
+        with (
+            patch.dict(os.environ, {"ZJU_USERNAME": "student", "ZJU_PASSWORD": "password"}, clear=True),
+            patch("src.auth.refresh_token", return_value=(session, "fresh-token")) as refresh,
+        ):
+            with self.assertRaisesRegex(Exception, "still rejected"):
+                _fetch_lessons_with_auth(session, "86161")
+        self.assertEqual(session.get.call_count, 2)
+        refresh.assert_called_once()
+
     def test_anonymous_access_does_not_require_credentials(self):
         session = catalogue_session([catalogue_item("1", {})])
         with patch("src.auth.refresh_token") as refresh:
